@@ -1,4 +1,4 @@
-# 🧠 AI Interview Recruiter
+# 🧠 AI Interview Platform
 
 > Transform how companies hire and how candidates prepare. AI-powered mock interviews with real feedback, powered by Next.js and Supabase.
 
