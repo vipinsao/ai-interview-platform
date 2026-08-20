@@ -37,14 +37,31 @@ function WelcomeContainer() {
       </div>
       {user && (
         <DropdownMenu>
+          {/* asChild used to put the trigger props straight onto the <img>,
+              which is neither focusable nor a button, so logout was
+              unreachable by keyboard. The button is the trigger now. */}
           <DropdownMenuTrigger asChild>
-            <Image
-              src={user?.picture}
-              alt="Avatar"
-              width={40}
-              height={40}
-              className="rounded-full select-none cursor-pointer"
-            />
+            <button
+              type="button"
+              aria-label="Account menu"
+              className="rounded-full cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2"
+            >
+              {/* next/image throws on an undefined src, and a Google account
+                  without a photo has none. */}
+              {user?.picture ? (
+                <Image
+                  src={user.picture}
+                  alt=""
+                  width={40}
+                  height={40}
+                  className="rounded-full select-none"
+                />
+              ) : (
+                <span className="flex h-10 w-10 items-center justify-center rounded-full bg-primary text-white font-bold">
+                  {user?.name?.charAt(0)?.toUpperCase() ?? "?"}
+                </span>
+              )}
+            </button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="w-32 ">
             <DropdownMenuItem
