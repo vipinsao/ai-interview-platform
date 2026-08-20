@@ -85,6 +85,51 @@ create table if not exists public.credit_purchases (
   created_at        timestamptz not null default now()
 );
 
+-- One row per candidate who opens an interview link and enters their name.
+--
+-- The session token is the candidate's only credential. It exists because the
+-- interview-taking flow is deliberately anonymous, and "anonymous" previously
+-- meant every request carried the interview id — which every candidate holding
+-- the same invite link also has. So one candidate's requests were
+-- indistinguishable from another's, and they shared a rate limit budget.
+create table if not exists public.interview_sessions (
+  session_token uuid primary key default gen_random_uuid(),
+  interview_id  uuid not null references public."Interviews"(interview_id) on delete cascade,
+  user_name     text not null,
+  user_email    text,
+  created_at    timestamptz not null default now(),
+  submitted_at  timestamptz
+);
+
+-- The scores the server issued, as it issued them.
+--
+-- This table is the reason the report can be believed. The score used to be
+-- returned to the browser and then sent back at the end inside the request that
+-- builds the report, so /api/score-answer need never have been called at all: a
+-- candidate could POST their own tens straight to /api/ai-feedback. The scores
+-- are now written here when they are issued, and the report is assembled from
+-- these rows. Nothing in the final request decides a number.
+--
+-- question and question_type are copied from the interview's stored
+-- questionList, never from the request, so the recruiter's report cannot be
+-- made to display text the candidate wrote.
+create table if not exists public.answer_scores (
+  session_token         uuid not null
+                          references public.interview_sessions(session_token) on delete cascade,
+  question_index        integer not null check (question_index >= 0),
+  question              text not null,
+  question_type         text,
+  transcript            text not null default '',
+  -- Null means the model could not score this answer. That is recorded rather
+  -- than treated as zero: a scoring outage must not look like a bad candidate.
+  score                 numeric(4,1) check (score >= 0 and score <= 10),
+  strengths             jsonb not null default '[]'::jsonb,
+  gaps                  jsonb not null default '[]'::jsonb,
+  suggested_improvement text,
+  created_at            timestamptz not null default now(),
+  primary key (session_token, question_index)
+);
+
 -- -----------------------------------------------------------------------------
 -- Indexes
 -- -----------------------------------------------------------------------------
@@ -95,6 +140,8 @@ create index if not exists interview_feedback_interview_id_idx
   on public."interview-feedback" (interview_id);
 create index if not exists credit_purchases_user_email_idx
   on public.credit_purchases (user_email);
+create index if not exists interview_sessions_interview_id_idx
+  on public.interview_sessions (interview_id);
 
 -- Partial and unique: a share token resolves to at most one report, and rows
 -- that were never shared do not compete for the index.
@@ -278,6 +325,69 @@ begin
 end;
 $$;
 
+-- Record the score the server just issued for one answer.
+--
+-- Write-once, with one exception. A question that already carries a real score
+-- keeps it: without that, a candidate could re-submit the same answer until the
+-- model happened to return a ten, and re-rolling would be indistinguishable
+-- from answering. The exception is a row whose score is null, which means the
+-- model failed the first time — that may be overwritten, so a retry after a
+-- scoring outage still works.
+--
+-- Returns whether this call's score is the one now stored, and the score that
+-- is stored, so the caller can show the candidate the real figure rather than
+-- one that was refused.
+create or replace function public.record_answer_score(
+  p_session_token  uuid,
+  p_question_index integer,
+  p_question       text,
+  p_question_type  text,
+  p_transcript     text,
+  p_score          numeric,
+  p_strengths      jsonb,
+  p_gaps           jsonb,
+  p_suggested      text
+)
+returns table (recorded boolean, final_score numeric)
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  v_score numeric;
+begin
+  insert into public.answer_scores as a (
+    session_token, question_index, question, question_type,
+    transcript, score, strengths, gaps, suggested_improvement
+  ) values (
+    p_session_token, p_question_index, p_question, p_question_type,
+    coalesce(p_transcript, ''), p_score,
+    coalesce(p_strengths, '[]'::jsonb), coalesce(p_gaps, '[]'::jsonb), p_suggested
+  )
+  on conflict (session_token, question_index) do update
+    set question             = excluded.question,
+        question_type        = excluded.question_type,
+        transcript           = excluded.transcript,
+        score                = excluded.score,
+        strengths            = excluded.strengths,
+        gaps                 = excluded.gaps,
+        suggested_improvement = excluded.suggested_improvement
+    where a.score is null
+  returning a.score into v_score;
+
+  if found then
+    return query select true, v_score;
+  end if;
+
+  select a.score into v_score
+    from public.answer_scores a
+   where a.session_token = p_session_token
+     and a.question_index = p_question_index;
+
+  return query select false, v_score;
+end;
+$$;
+
 -- -----------------------------------------------------------------------------
 -- Constraints added separately, so the file is safe to run against a project
 -- whose tables already exist. NOT VALID enforces the rule on every future
@@ -331,10 +441,13 @@ grant select, update, delete on public."Interviews" to authenticated;
 revoke all on public."interview-feedback" from anon, authenticated;
 grant select on public."interview-feedback" to authenticated;
 
--- rate_limits and credit_purchases: server only. A user must not be able to
--- clear their own rate limit counter or forge a payment record.
-revoke all on public.rate_limits      from anon, authenticated;
-revoke all on public.credit_purchases from anon, authenticated;
+-- rate_limits, credit_purchases, interview_sessions and answer_scores: server
+-- only. A user must not be able to clear their own rate limit counter, forge a
+-- payment record, mint themselves a session, or write their own scores.
+revoke all on public.rate_limits        from anon, authenticated;
+revoke all on public.credit_purchases   from anon, authenticated;
+revoke all on public.interview_sessions from anon, authenticated;
+revoke all on public.answer_scores      from anon, authenticated;
 
 -- -----------------------------------------------------------------------------
 -- Function privileges
@@ -362,6 +475,11 @@ revoke all on function public.grant_purchased_credits(text, text, integer, numer
 grant execute on function public.grant_purchased_credits(text, text, integer, numeric, text, text)
   to service_role;
 
+revoke all on function public.record_answer_score(uuid, integer, text, text, text, numeric, jsonb, jsonb, text)
+  from public, anon, authenticated;
+grant execute on function public.record_answer_score(uuid, integer, text, text, text, numeric, jsonb, jsonb, text)
+  to service_role;
+
 -- -----------------------------------------------------------------------------
 -- Row level security
 --
@@ -381,6 +499,8 @@ alter table public."Interviews"         enable row level security;
 alter table public."interview-feedback" enable row level security;
 alter table public.rate_limits          enable row level security;
 alter table public.credit_purchases     enable row level security;
+alter table public.interview_sessions   enable row level security;
+alter table public.answer_scores        enable row level security;
 
 -- Users: a signed-in user may only see and edit their own profile row. The
 -- column grants above decide what "edit" can reach.
@@ -440,5 +560,7 @@ create policy "recruiters read feedback for own interviews" on public."interview
     )
   );
 
--- rate_limits and credit_purchases: RLS is enabled with no policies at all, so
--- anon and authenticated have no access by any route, privileges aside.
+-- rate_limits, credit_purchases, interview_sessions and answer_scores: RLS is
+-- enabled with no policies at all, so anon and authenticated have no access by
+-- any route, privileges aside. Every one of these is written by the server on
+-- the user's behalf, never by the user.

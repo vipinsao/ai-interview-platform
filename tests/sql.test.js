@@ -495,6 +495,113 @@ describe("supabase/schema.sql", { skip }, () => {
   });
 
   // ---------------------------------------------------------------------------
+  // Candidate sessions and issued scores
+  // ---------------------------------------------------------------------------
+
+  it("a score is written once and cannot be improved by resubmitting", async () => {
+    const token = await startSession(pool, "77777777-7777-4777-8777-777777777777");
+
+    const first = await recordScore(pool, token, 0, 6);
+    assert.equal(first.recorded, true);
+    assert.equal(Number(first.final_score), 6);
+
+    // The attack: answer again and again until the model returns a ten.
+    const second = await recordScore(pool, token, 0, 10);
+    assert.equal(second.recorded, false, "a second score must not replace the first");
+    assert.equal(Number(second.final_score), 6, "the caller is told the stored figure");
+
+    const { rows } = await pool.query(
+      "select score from public.answer_scores where session_token = $1 and question_index = 0",
+      [token]
+    );
+    assert.equal(Number(rows[0].score), 6);
+  });
+
+  it("an answer the model could not score may be scored by a retry", async () => {
+    const token = await startSession(pool, "88888888-8888-4888-8888-888888888888");
+
+    const failed = await recordScore(pool, token, 0, null);
+    assert.equal(failed.recorded, true);
+    assert.equal(failed.final_score, null);
+
+    const retried = await recordScore(pool, token, 0, 7);
+    assert.equal(retried.recorded, true, "a null score is the one case that may be overwritten");
+    assert.equal(Number(retried.final_score), 7);
+
+    // ...and once it is a real score, it is closed again.
+    const third = await recordScore(pool, token, 0, 10);
+    assert.equal(third.recorded, false);
+    assert.equal(Number(third.final_score), 7);
+  });
+
+  it("twelve simultaneous submissions of one answer record exactly one score", async () => {
+    const token = await startSession(pool, "99999999-9999-4999-8999-999999999999");
+
+    const results = await Promise.all(
+      Array.from({ length: 12 }, (_, i) => recordScore(pool, token, 0, 1 + i * 0.5))
+    );
+
+    assert.equal(
+      results.filter((row) => row.recorded).length,
+      1,
+      "exactly one concurrent caller may set the score"
+    );
+    const { rows } = await pool.query(
+      "select count(*)::int as n from public.answer_scores where session_token = $1",
+      [token]
+    );
+    assert.equal(rows[0].n, 1);
+  });
+
+  it("a browser can neither read sessions and scores nor call the function that writes them", async () => {
+    const token = await startSession(pool, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+    const client = await pool.connect();
+    try {
+      for (const role of ["anon", "authenticated"]) {
+        await asRole(client, role, RECRUITER, async () => {
+          for (const table of ["interview_sessions", "answer_scores"]) {
+            await client.query("savepoint probe");
+            await assert.rejects(
+              () => client.query(`select * from public.${table} limit 1`),
+              (error) => error.code === INSUFFICIENT_PRIVILEGE,
+              `${role} could read ${table}`
+            );
+            await client.query("rollback to savepoint probe");
+          }
+
+          await assert.rejects(
+            () =>
+              client.query(
+                "select * from public.record_answer_score($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+                [token, 0, "q", "Technical", "t", 10, "[]", "[]", ""]
+              ),
+            (error) => error.code === INSUFFICIENT_PRIVILEGE,
+            `${role} could write its own score`
+          );
+        });
+      }
+    } finally {
+      client.release();
+    }
+  });
+
+  it("deleting an interview takes its sessions and scores with it", async () => {
+    const interviewId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const token = await startSession(pool, interviewId);
+    await recordScore(pool, token, 0, 5);
+
+    await pool.query(`delete from public."Interviews" where interview_id = $1`, [interviewId]);
+
+    for (const table of ["interview_sessions", "answer_scores"]) {
+      const { rows } = await pool.query(
+        `select count(*)::int as n from public.${table} where session_token = $1`,
+        [token]
+      );
+      assert.equal(rows[0].n, 0, `${table} kept an orphan row`);
+    }
+  });
+
+  // ---------------------------------------------------------------------------
   // Share tokens
   // ---------------------------------------------------------------------------
 
@@ -555,4 +662,27 @@ async function consume(pool, key, limit, windowMs, now) {
 async function creditsOf(pool, email) {
   const { rows } = await pool.query(`select credits from public."Users" where email = $1`, [email]);
   return rows[0].credits;
+}
+
+/** Creates an interview and a candidate session on it, returning the token. */
+async function startSession(pool, interviewId) {
+  await pool.query(
+    `insert into public."Interviews" ("jobPosition","jobDescription",duration,type,"questionList","userEmail",interview_id)
+     values ('Dev','Builds things','15 min','["Technical"]','[]'::jsonb,$1,$2)`,
+    [RECRUITER, interviewId]
+  );
+  const { rows } = await pool.query(
+    `insert into public.interview_sessions (interview_id, user_name, user_email)
+     values ($1, 'Candidate', 'candidate@example.com') returning session_token`,
+    [interviewId]
+  );
+  return rows[0].session_token;
+}
+
+async function recordScore(pool, token, index, score) {
+  const { rows } = await pool.query(
+    "select * from public.record_answer_score($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+    [token, index, "Explain event loops.", "Technical", "an answer", score, "[]", "[]", ""]
+  );
+  return rows[0];
 }
