@@ -10,7 +10,7 @@ import { postWithAuth } from "@/services/apiClient";
 import { useUser } from "@/app/provider";
 
 function QuestionList({ formData, onCreateLink }) {
-  const { user } = useUser();
+  const { setUser } = useUser();
   const [loading, setLoading] = useState(false);
   const [saveLoading, setSaveLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -45,37 +45,39 @@ function QuestionList({ formData, onCreateLink }) {
     setSaveLoading(true);
     const interview_id = uuidv4();
 
-    const { error: insertError } = await supabase
-      .from("Interviews")
-      .insert([
-        {
-          ...formData,
-          questionList,
-          userEmail: user?.email,
-          interview_id,
-        },
-      ])
-      .select();
+    // One call, one transaction. This used to be an INSERT from the browser
+    // followed by a separate "credits - 1" UPDATE whose failure was logged and
+    // ignored — so a failed insert still charged a credit, and a recruiter who
+    // simply never sent the second request was never charged at all. The
+    // database now spends the credit and writes the row together, and takes
+    // the owner from the verified session rather than from this form.
+    const { error } = await supabase.rpc("create_interview", {
+      p_job_position: formData.jobPosition,
+      p_job_description: formData.jobDescription,
+      p_duration: formData.duration,
+      // Stored as a JSON-encoded array of type names.
+      p_type: JSON.stringify(
+        Array.isArray(formData.type) ? formData.type : [formData.type].filter(Boolean)
+      ),
+      p_question_list: questionList,
+      p_interview_id: interview_id,
+    });
 
-    // Previously the failure was ignored: the user got an interview link for a
-    // row that was never written, and was charged a credit for it.
-    if (insertError) {
-      setSaveLoading(false);
-      toast.error(`Could not save the interview: ${insertError.message}`);
+    setSaveLoading(false);
+
+    if (error) {
+      // P0001 is the "no interview credits remaining" raised by the function.
+      toast.error(
+        error.code === "P0001"
+          ? "You have no interview credits left. Buy more on the billing page."
+          : `Could not save the interview: ${error.message}`
+      );
       return;
     }
 
-    const { error: creditError } = await supabase
-      .from("Users")
-      .update({ credits: Number(user?.credits) - 1 })
-      .eq("email", user?.email)
-      .select();
-
-    if (creditError) {
-      console.error("Credit update failed:", creditError.message);
-    }
-
-    setSaveLoading(false);
+    setUser((current) =>
+      current ? { ...current, credits: Math.max((current.credits ?? 1) - 1, 0) } : current
+    );
     onCreateLink(interview_id);
   };
 
