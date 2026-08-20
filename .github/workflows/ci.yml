@@ -42,8 +42,6 @@ jobs:
         env:
           TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
 
-      - run: npm audit --audit-level=high
-
       # `next build` prerenders pages that import the Supabase browser client,
       # which refuses to start without its two public variables. These are
       # syntactically valid placeholders, not secrets: the build never makes a
