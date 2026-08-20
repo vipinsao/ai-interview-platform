@@ -17,17 +17,20 @@ function page() {
 
         {/* Subtitle */}
         <h2 className="text-gray-600 mb-2 text-center">
-          Thank you for particapting in the AI-driven interview with{" "}
+          Thank you for participating in the AI-driven interview with{" "}
           <span className="text-primary">AIcruiter</span>
         </h2>
 
         {/* Illustration Image */}
+        {/* A fixed 400x400 needed 464px inside this p-8 card, and the
+            interview layout is overflow-x-hidden, so on a phone the image was
+            clipped rather than scrollable. */}
         <Image
           src="/completion.jpg"
           alt="Interview Illustration"
-          width={200}
-          height={100}
-          className=" h-[400px] w-[400px]"
+          width={320}
+          height={320}
+          className="w-full max-w-[320px] h-auto"
         />
 
         <div className="flex gap-4 items-center">
