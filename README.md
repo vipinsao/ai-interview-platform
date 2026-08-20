@@ -1,391 +1,157 @@
-# 🧠 AI Interview Platform
+# AI Interview Platform
 
-> Transform how companies hire and how candidates prepare. AI-powered mock interviews with real feedback, powered by Next.js and Supabase.
+A web app where a recruiter generates a role-specific interview with a language model, shares a link, and the candidate answers out loud in the browser — each answer scored individually and collected into a report.
 
-[![Live Demo](https://img.shields.io/badge/demo-live-green.svg)](https://ai-interview-agent-gules.vercel.app)
-[![Next.js](https://img.shields.io/badge/next.js-14+-black?logo=next.js)](https://nextjs.org)
-[![Supabase](https://img.shields.io/badge/Supabase-DB%20%26%20Auth-green?logo=supabase)](https://supabase.com)
+## Screenshots
 
----
+| | |
+|---|---|
+| ![Homepage](./homepage.png) | ![Dashboard](./dashboard.png) |
+| Landing page | Recruiter dashboard |
+| ![Create interview](./createInterview.png) | ![Billing](./billing.png) |
+| Interview creation | Credit purchase |
 
-## What Problem Does This Solve?
+## How it works
 
-Here's the reality: **hiring is broken**. Companies spend hours reviewing resumes, conducting multiple rounds of interviews, and still can't accurately predict candidate performance. On the flip side, candidates either get zero interview practice or have to pay hundreds for coaching.
+A signed-in recruiter fills in the role, description, duration and interview types on `/dashboard/create-interview`; `QuestionList.jsx` posts that to `app/api/ai-model/route.js` with the Supabase session JWT in an `Authorization` header, and the route verifies the token, spends one unit of that user's hourly rate limit, calls the model, and validates the reply against `questionListSchema` before returning it — a malformed reply is retried once and then refused rather than shown. The questions are stored in the `Interviews` table under the recruiter's email and turned into a `/interview/<uuid>` link.
 
-**AI Interview Recruiter** bridges this gap. It's a platform where candidates can practice unlimited mock interviews with AI-generated questions tailored to their role, while companies get instant, data-driven feedback on candidate capabilities. No more gut-feeling hires. No more interview anxiety.
+A candidate opening that link is not signed in, so `app/interview/[interview_id]/page.jsx` reads the interview through `app/api/interview/[interview_id]/route.js` instead of querying Supabase directly — row level security denies anonymous reads of the table, and the route hands back exactly the one row the link names. The session itself (`app/interview/[interview_id]/start/`) uses the browser's own Web Speech API: `speechSynthesis` reads each question aloud and `SpeechRecognition` captures the spoken answer, both wired up in `hooks/useSpeech.js`. There is no voice vendor and no key in the client.
 
-The traditional hiring funnel looks like this:
-1. Screen resumes (slow, biased)
-2. Phone screen (expensive, inconsistent)
-3. Technical interview (takes hours)
-4. Loop interviews (exhausting)
+Each answer is posted to `app/api/score-answer/route.js`, which scores it 0–10 against explicit criteria and returns a `{ score, strengths, gaps, suggestedImprovement }` object validated by `answerScoreSchema`. When the last question is done, `app/api/ai-feedback/route.js` computes the rating breakdown arithmetically from those per-answer scores (`lib/score.js`) — the model is asked only for the prose summary — and writes the report to `interview-feedback`. The recruiter reads it back on `/scheduled-interview/<id>/details`, where row level security limits them to their own interviews.
 
-My platform accelerates step 1-2 and provides objective metrics for the technical screening stage. Candidates come in more prepared, and companies see real performance data.
+Every branch of the live session — no speech recognition in this browser, microphone blocked, recognition error, candidate silent, scoring endpoint down — is a transition in the pure reducer at `lib/interviewMachine.js`, which is why there is no state in which the page shows a spinner with no way forward.
 
----
+```mermaid
+sequenceDiagram
+    actor R as Recruiter
+    participant UI as Next.js app
+    participant API as Route handlers
+    participant LLM as Groq (OpenAI-compatible)
+    participant DB as Supabase Postgres
+    actor C as Candidate
+    participant WS as Browser Web Speech API
 
-## Why I Built This
+    R->>UI: Create interview (role, description, duration, types)
+    UI->>API: POST /api/ai-model (Bearer: Supabase JWT)
+    API->>API: verify JWT, consume per-user rate limit
+    API->>LLM: prompt for questions
+    LLM-->>API: JSON reply
+    API->>API: parse + validate (questionListSchema), retry once
+    API-->>UI: { interviewQuestions }
+    UI->>DB: insert Interviews row (RLS: userEmail = caller)
+    UI-->>R: shareable /interview/<id> link
 
-I've been on both sides of the interview table. As a candidate, I felt completely unprepared walking into my first technical interview—no amount of LeetCode practice simulates the pressure of a real interview. As someone involved in hiring decisions later, I realized how much bias and inconsistency exists in candidate evaluation.
+    C->>UI: open link, enter name
+    UI->>API: GET /api/interview/<id>
+    API->>DB: read that one row (service role)
+    API-->>UI: interview + questions
 
-The existing solutions were all flawed:
-- **Coding platforms** (LeetCode, HackerRank) test algorithms but don't evaluate communication or problem-solving approach
-- **Interview coaching** ($100-300/hour) is expensive and inaccessible
-- **Manual mock interviews** with friends are inconsistent and don't provide structured feedback
-- **Generic interview prep sites** give the same questions to everyone, making them feel unrealistic
+    loop each question
+        UI->>WS: speechSynthesis.speak(question)
+        WS-->>C: question read aloud
+        C-->>WS: spoken answer
+        WS-->>UI: SpeechRecognition transcript
+        UI->>API: POST /api/score-answer
+        API->>LLM: score against explicit criteria
+        LLM-->>API: JSON reply
+        API->>API: validate (answerScoreSchema), retry once
+        API-->>UI: { score, strengths, gaps, suggestedImprovement }
+    end
 
-I wanted to build something that combines the best of all worlds: unlimited practice, personalized feedback, company-ready evaluation, and accessibility for everyone.
-
----
-
-## ✨ Core Features
-
-**For Candidates:**
-- 🎯 **Practice Unlimited Interviews** - Take as many mock interviews as you want, anytime
-- 📊 **Personalized Feedback** - Get detailed ratings on Technical Skills, Communication, Problem Solving, and Experience
-- 🔄 **Track Your Progress** - See how your scores improve with each interview attempt
-- 📱 **Flexible Practice** - Interview from anywhere—mobile, tablet, or desktop
-
-**For Companies & Interviewers:**
-- 👥 **Candidate Management** - Add candidates, track their progress, compare performance metrics
-- 📅 **Scheduled Interviews** - Create interview batches, set deadlines, monitor completion
-- 📈 **Structured Evaluation** - AI provides consistent, bias-free feedback on all candidates
-- 🔗 **Shareable Interview Links** - Generate unique links—candidates don't need to sign up to start
-- 📄 **Comprehensive Reports** - Export detailed feedback summaries for hiring decisions
-
-**Technical Features:**
-- 🔐 **Google OAuth Integration** - One-click sign-in with Supabase Auth
-- ⚡ **Real-Time Updates** - See interview results update instantly as candidates complete sessions
-- 🎨 **Modern, Responsive UI** - Built with Tailwind CSS and ShadCN UI for all screen sizes
-- 🚀 **Production-Grade Performance** - Deployed on Vercel with sub-second load times
-
----
-
-## 📷 Screenshots
-
->![Homepage](./homepage.png)
-## Homepage
->![Dashboard](./dashboard.png)
-## Dashboard
->![CreateInterview](./createInterview.png)
-## Create Interview
->![Billing](./billing.png)
-## Billing
-
----
-
-## 🛠️ Tech Stack
-
-| Layer          | Technology           | Why This Choice                                    |
-|----------------|----------------------|----------------------------------------------------|
-| **Frontend**   | Next.js 14+          | Server-side rendering, API routes, optimal performance |
-| **Styling**    | Tailwind CSS         | Rapid prototyping, consistent design system       |
-| **Components** | ShadCN UI            | Accessible, customizable, copy-paste simplicity   |
-| **Backend**    | Supabase             | Real-time database, built-in auth, no cold starts |
-| **Auth**       | Google OAuth         | Frictionless sign-up, high security               |
-| **Deployment** | Vercel               | Native Next.js support, automatic deployments     |
-
-**Why This Stack?**
-
-I specifically chose technologies that eliminate friction. Next.js handles both frontend and backend, meaning no CORS issues or complex deployment pipelines. Supabase gives me a real database with real-time subscriptions—so when a candidate completes an interview, the hiring manager sees the feedback instantly. Google OAuth removes the sign-up barrier entirely. Vercel deploys automatically whenever I push to main.
-
----
-
-## 🚀 Live Demo
-
-**Ready to see it in action?**
-- 🔗 **Live App:** [https://ai-interview-agent-gules.vercel.app](https://ai-interview-agent-gules.vercel.app)
-- 🎥 **Demo Video:** [Watch how it works](https://drive.google.com/file/d/15x5dKG05FC5U26BiZ5P5UjnbHDauwMS0/view?usp=sharing)
-
----
-
-## 🤖 How It Works
-
-### For Candidates
-```
-1. Sign In (Google OAuth) → 30 seconds
-2. Select Interview Type (Frontend, Backend, etc.) → 10 seconds
-3. Answer AI-Generated Questions → 15-30 minutes
-4. Receive Detailed Feedback → Instant
-5. Review Score Breakdown & Improvement Areas → 5 minutes
+    UI->>API: POST /api/ai-feedback (all answers)
+    API->>API: aggregateScores() — arithmetic, not the model
+    API->>LLM: prose summary only
+    API->>DB: insert interview-feedback row (service role)
+    API-->>UI: report
+    UI-->>C: completion page
+    R->>DB: read report (RLS: own interviews only)
 ```
 
-### For Companies
-```
-1. Sign In → 30 seconds
-2. Create Interview Session → 2 minutes
-3. Add Candidates (email list or individual) → 5 minutes
-4. Share Interview Links with Candidates → Instant
-5. Monitor Completion in Dashboard → Real-time
-6. Review AI Feedback & Export Reports → 10 minutes
-```
-
-### Behind The Scenes
-- Candidate responses are analyzed in real-time using AI models
-- Structured prompts ensure consistent, comparable feedback
-- Results are stored in Supabase with real-time subscriptions
-- Dashboard updates instantly—no page refresh needed
-- Data is encrypted and compliant with privacy standards
-
----
-
-## 🏗️ Architecture & System Design
-
-```
-Next.js App Router (Full-Stack Framework)
-├── Frontend (React Components)
-│   ├── Authentication Pages
-│   ├── Dashboard (Candidate & Recruiter Views)
-│   ├── Interview Session Interface
-│   └── Feedback & Analytics Pages
-├── API Routes (Backend)
-│   ├── /api/auth/callback (OAuth)
-│   ├── /api/interviews (CRUD operations)
-│   ├── /api/feedback (AI processing)
-│   └── /api/analytics (Reporting)
-├── Dynamic Routes
-│   └── /scheduled-interview/[id] (Unique interview pages)
-└── Supabase Integration
-    ├── Real-time Database
-    ├── Authentication
-    ├── Row-Level Security (RLS)
-    └── Subscriptions (Live updates)
-```
-
-**Key Design Decisions:**
-
-- **Full-stack Next.js** - Eliminates backend complexity, single deployment
-- **Real-time with Supabase** - Interview results appear instantly without polling
-- **Dynamic routes for interviews** - Each interview gets a unique, shareable URL
-- **RLS (Row-Level Security)** - Ensures users can only see their own data
-- **Serverless functions** - API routes scale automatically with demand
-
----
-
-## 📦 Installation & Setup
+## Setup
 
 ### Prerequisites
-```
-✓ Node.js v18+
-✓ npm or yarn package manager
-✓ Supabase account (free tier available)
-✓ Google OAuth credentials
-```
 
-### Step-by-Step Setup
+- Node.js 24 and npm 11 (built and tested on these; Node 18+ should work)
+- A Supabase project — free tier, no card
+- A Groq API key — free tier, no card
+- Optionally a PayPal sandbox client id, only if you want the billing page to work
 
-**1. Clone the Repository**
+Everything the app depends on has a free tier. There is nothing to pay for.
+
+### Install
+
 ```bash
-git clone https://github.com/vipinsao/ai-interview-recruiter.git
-cd ai-interview-recruiter
-```
-
-**2. Install Dependencies**
-```bash
+git clone https://github.com/vipinsao/ai-interview-platform.git
+cd ai-interview-platform
 npm install
 ```
 
-**3. Set Up Environment Variables**
+### Environment
 
-Create a `.env.local` file in your project root:
-```env
-# Supabase Configuration
-NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
-NEXT_PUBLIC_SUPABASE_ANON_KEY=your-anon-key-here
-
-# Application Configuration
-NEXT_PUBLIC_HOST_URL=http://localhost:3000
-# Update to your production URL when deploying
-
-# Optional: API Keys for AI services
-GEMINI_API_KEY=your-api-key
-```
-
-**4. Configure Google OAuth**
-
-- Visit [Google Cloud Console](https://console.cloud.google.com)
-- Create a new project or select existing
-- Enable Google+ API
-- Create OAuth 2.0 credentials (Web application type)
-- Authorized redirect URIs:
-  - `http://localhost:3000/auth/callback` (local)
-  - `https://your-domain.vercel.app/auth/callback` (production)
-- Copy Client ID and Client Secret to Supabase:
-  - Go to Supabase → Authentication → Providers
-  - Enable Google provider
-  - Paste Client ID and Client Secret
-
-**5. Set Up Supabase Database**
-
-Run the migrations:
 ```bash
-npm run db:migrate
+cp .env.example .env.local
 ```
 
-This creates tables for:
-- Users (via Supabase Auth)
-- Interviews
-- Interview Sessions
-- Feedback Results
-- Candidates
+Fill in every variable. `.env.example` says where each one comes from. The app throws on startup naming anything that is missing, rather than failing later inside a client library.
 
-**6. Run Locally**
+`SUPABASE_SERVICE_ROLE_KEY` is server-only. It bypasses row level security, so it must never be given a `NEXT_PUBLIC_` prefix.
+
+### Supabase
+
+1. Create a project at [supabase.com](https://supabase.com).
+2. Open the SQL editor and run [`supabase/schema.sql`](./supabase/schema.sql). It creates the four tables (`Users`, `Interviews`, `interview-feedback`, `rate_limits`) and enables row level security with the ownership policies.
+3. Under Authentication → Providers, enable Google and paste in a client id and secret from the [Google Cloud console](https://console.cloud.google.com). Add `http://localhost:3000` and your deployed origin to the redirect allow-list.
+
+Note on `supabase/schema.sql`: the tables were originally created through the Supabase dashboard, so that file is reconstructed from the queries the application makes rather than copied from an original migration. It is accurate enough to stand up a fresh project, but diff it against an existing one before running it.
+
+### Run
+
 ```bash
-npm run dev
+npm run dev     # http://localhost:3000
+npm test        # unit tests (node:test, no runner dependency)
+npm run lint
+npm run build
 ```
 
-Navigate to [http://localhost:3000](http://localhost:3000) — you're all set!
+`npm run build` prerenders pages that construct the Supabase browser client, so `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY` must be present for it to complete. CI passes syntactically valid placeholders for this; no network call is made during the build.
 
----
+## Tech stack
 
-## 🎯 Key Technical Achievements
+Only what is actually in `package.json`:
 
-**Real-Time Interview Feedback**
-- When a candidate submits their response, Supabase subscriptions push updates to the dashboard immediately
-- Eliminates the "waiting for results" experience
+- **Next.js 15.3** (App Router) and **React 18** — pages and API route handlers in one deployment
+- **JavaScript**, not TypeScript — the project has a `jsconfig.json` and no `tsconfig.json`
+- **Tailwind CSS v4** with Radix UI primitives (shadcn/ui "new-york" style) and **lucide-react** icons
+- **Supabase** (`@supabase/supabase-js`) — Postgres, Google OAuth, row level security
+- **openai** SDK pointed at **Groq**'s OpenAI-compatible endpoint
+- **zod** — validation of every model reply and every API request body
+- **Web Speech API** — browser built-in, no dependency
+- **@paypal/react-paypal-js** — credit purchase buttons
+- **sonner**, **react-hot-toast**, **moment**, **uuid**
+- **ESLint 9** with `eslint-config-next`; tests run on the built-in `node:test` runner
 
-**Seamless Authentication Flow**
-- Google OAuth integrated without external backend
-- Supabase handles token refresh automatically
-- Users don't see login pages—they go straight to the app
+## Notes and limitations
 
-**Scalable Database Design**
-- Row-Level Security ensures data isolation between users
-- Indexes on frequently queried fields (user_id, interview_id)
-- Real-time subscriptions optimized to only send relevant updates
+**Speech recognition is not available in every browser.** It works in Chrome and other Chromium browsers (Edge, Opera) and in Safari 14.1+ on macOS / 14.5+ on iOS, in all cases behind the `webkitSpeechRecognition` prefix. Firefox does not implement it at all. The app detects this at runtime and falls back to typed answers, so the interview still works everywhere — but a Firefox user types.
 
-**Dynamic Interview Generation**
-- Each interview session gets a unique URL with a secure token
-- Candidates can share links without creating accounts
-- Prevents URL guessing through session-based access control
+**Speech recognition is not private and not offline.** In Chrome, audio is streamed to Google's speech service for transcription. Nothing is recognised locally, and the feature does not work without a network connection.
 
----
+**Free LLM tiers may train on what you send them.** Fine for a portfolio project; worth knowing before putting a real candidate's answers through it.
 
-## 😤 Challenges I Faced
+**Rate limiting is not atomic.** The counter is read, evaluated and written back as separate statements, so two requests arriving in the same instant can both be admitted. At roughly one request per spoken answer this is not worth a lock; the fix would be a Postgres function doing the increment in a single statement.
 
-### Challenge 1: Keeping Interview Results Fresh Without Overloading the Database
-**Problem:** With multiple candidates interviewing simultaneously, polling the database every second would cause issues at scale.
+**Scoring is a language model's judgement, not a measurement.** The same answer can score differently on different runs. Only the aggregate arithmetic is deterministic — the per-answer scores are not. There is no accuracy figure for it because none has been measured.
 
-**Solution:** Implemented Supabase real-time subscriptions. Instead of polling, the app listens for changes and updates only when new results arrive. This reduced database load by ~80%.
+**Interview sessions do not survive a page refresh.** The candidate's name and questions live in React context, so a refresh mid-interview ends the session; the page says so and links back rather than hanging.
 
-### Challenge 2: Consistent AI Feedback Across Different Domains
-**Problem:** Generic AI prompts gave vague feedback like "Good communication skills." Not useful for hiring decisions.
+**The billing page does not verify payments.** PayPal approval adds credits straight from the browser, with no server-side capture or verification, so the credit balance is not trustworthy. Treat it as a UI demonstration.
 
-**Solution:** Created domain-specific evaluation templates. For frontend roles, the AI checks HTML/CSS/JS knowledge specifically. For backend roles, it focuses on database design and scalability thinking. Feedback is now measurable and comparable.
+**There is no deployed instance linked here.** An earlier build was deployed to Vercel, but it runs the pre-rewrite code and its question generation is broken — the free OpenRouter model it called (`microsoft/mai-ds-r1:free`) has been retired and the endpoint now returns a 404 from upstream. Redeploy from this branch before linking a demo.
 
-### Challenge 3: Handling Authentication Across Different User Types
-**Problem:** Candidates and Recruiters have different permissions—candidates can't see other candidates' results, recruiters can't take interviews.
+**Two toast libraries are in use** (`sonner` and `react-hot-toast`) for historical reasons. One should go.
 
-**Solution:** Implemented Supabase RLS policies. Each database query automatically filters by `auth.uid()`, ensuring users only access their own data. No middleware needed.
+See [DECISIONS.md](./DECISIONS.md) for why the voice provider, the scoring format and the rate limiter are built the way they are.
 
-### Challenge 4: Mobile Interview Experience
-**Problem:** Taking an interview on a phone with small screens was frustrating.
+## License
 
-**Solution:** Redesigned the interview interface for mobile-first. Questions and input fields stack vertically. Feedback page uses collapsible sections. Result: 40% increase in mobile users completing interviews.
-
----
-
-## 📚 What I Learned
-
-**Technical Insights:**
-- Real-time databases are game-changers for user experience. Seeing results pop up instantly makes the app feel responsive and alive
-- Row-Level Security eliminates entire classes of security bugs if done right
-- Serverless functions scale beautifully until your database becomes the bottleneck
-
-**Product Insights:**
-- Reducing friction matters more than adding features. The one-click Google sign-in doubled engagement
-- Users want progress tracking. Adding a "scores over time" chart increased repeat usage
-- Mobile experience is critical. Half my traffic is mobile, but most competitors ignore it
-
-**Architectural Insights:**
-- Full-stack frameworks (Next.js) beat microservices for solo projects. Deploy once instead of managing 3 services
-- Real-time updates feel like magic but require thinking differently about data flow
-- Spending time on database design upfront saves refactoring later
-
----
-
-## 🗺️ Roadmap: What's Coming Next
-
-**Short Term (Next 2-3 months)**
-- [ ] Video Interview Mode - Record video responses alongside text
-- [ ] Interview Analytics Dashboard - See score trends over time
-- [ ] Batch Interview Creation - Upload CSV of candidates, create interviews for all
-- [ ] Export Reports - Download PDF feedback summaries for hiring decisions
-
-**Medium Term (3-6 months)**
-- [ ] Peer-to-Peer Interviews - Schedule real interviews with other users for practice
-- [ ] Interview Templates - Recruiters can create custom question sets
-- [ ] Behavioral Question Bank - Add culture-fit and soft skill evaluations
-- [ ] Multi-Language Support - Questions and feedback in Hindi, Spanish, French
-- [ ] Slack Integration - Get instant notifications when candidates complete interviews
-
-**Long Term (6+ months)**
-- [ ] API for ATS Integration - Connect with Workable, Lever, Greenhouse
-- [ ] Team Plans - Pricing tiers for companies to manage multiple hiring managers
-- [ ] Mobile App - Native iOS/Android for better interview experience
-- [ ] Advanced Analytics - Predict which candidates will succeed in your company
-
----
-
-## 🤝 Contributing
-
-I'm actively building this and welcome contributions from the community!
-
-**To Contribute:**
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/your-feature-name`)
-3. Make your changes with clear commit messages
-4. Push to your branch (`git push origin feature/your-feature-name`)
-5. Open a Pull Request with a description of your changes
-
-**Areas where help is appreciated:**
-- UI/UX improvements and accessibility enhancements
-- Additional interview question domains
-- Documentation and guides
-- Bug fixes and performance optimizations
-- Testing and quality assurance
-
-**Found a bug or have feedback?** [Open an issue](https://github.com/vipinsao/ai-interview-recruiter/issues) and describe what you're experiencing.
-
----
-
-## 📝 License
-
-This project is open source and licensed under the MIT License. See [LICENSE](LICENSE) for details.
-
----
-
-## 💼 About Me
-
-I'm **Vipin Chandra Sao**, a full-stack developer passionate about building tools that solve real problems at scale. I created this project because I've experienced the frustration on both sides—as a candidate nervous about interviews, and as someone involved in hiring who wished we had better evaluation tools.
-
-When I'm not building, I'm:
-- Exploring new technologies (currently diving deep into real-time systems)
-- Contributing to open source projects
-- Helping junior developers navigate their careers
-- Writing about web development and system design
-
-**Let's Connect:**
-- **GitHub:** [@vipinsao](https://github.com/vipinsao)
-- **Twitter:** [@vipinsao](https://twitter.com/vipinsao)
-- **LinkedIn:** [linkedin.com/in/vipinsao](https://linkedin.com/in/vipinsao)
-- **Email:** vipinsao@example.com
-
----
-
-## ⭐ Show Your Support
-
-If this project helped you ace an interview or improved your hiring process, please:
-
-1. **Give it a star** ⭐ on GitHub
-2. **Share it** with your network
-3. **Provide feedback** on [Twitter](https://twitter.com/vipinsao)
-4. **Contribute** if you're a developer looking to help
-
-Your support helps this project grow and helps more people succeed in their interviews!
-
----
-
-<p align="center">Building the future of technical hiring, one interview at a time</p>
-<p align="center">Made with ❤️ and lots of ☕ | Last updated: October 2025</p>
+[MIT](./LICENSE)
