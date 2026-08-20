@@ -68,10 +68,19 @@ Now:
   counted as zero.
 - The rating breakdown shown to the recruiter is computed in JavaScript from
   those per-answer scores (`lib/score.js`), not asked of a model. The same
-  answers always produce the same ratings, and a recruiter can trace any figure
-  back to the answers behind it. Only the prose summary is generated — and if
-  that call fails, the report is still returned with its ratings intact and
-  flagged as having no written summary.
+  answers always produce the same ratings, and a recruiter can trace most
+  figures back to the answers behind them. Only the prose summary is generated —
+  and if that call fails, the report is still returned with its ratings intact
+  and flagged as having no written summary.
+
+  One caveat, because "trace any figure back" was too strong: a rating bucket
+  with no questions of its type falls back to the overall mean. An interview of
+  only technical questions still reports a "Communication" number, and that
+  number is the overall average rather than a measurement of communication. A
+  blank would be less useful than an estimate, so the fallback stays — but
+  presenting an estimate as a measurement is a different thing, so
+  `ratingProvenance()` in `lib/score.js` marks which buckets were measured and
+  the report puts an asterisk and a footnote on the ones that were not.
 
 Nothing a model produces reaches the database or the screen without passing a
 schema first. Model replies are also never `JSON.parse`d directly:
@@ -102,9 +111,149 @@ The design:
 - If that key is missing, the route returns 503 rather than running unmetered.
   Failing open on a rate limiter would defeat its purpose.
 
-Known limitation: read-then-write is not atomic, so two simultaneous requests
-can both be admitted. The fix is a Postgres function doing the increment in one
-statement; at one request per spoken answer, it was not worth the complexity.
+### It is now atomic, and that mattered more than it looked
+
+The original implementation read the counter, decided in JavaScript, then wrote
+it back. Two requests arriving together both read the same count and both were
+admitted. This was documented as an accepted trade-off on the grounds that the
+endpoints see about one request per spoken answer — which is true of honest
+traffic and irrelevant to the case a rate limiter exists for. Anyone deliberately
+spending the project's LLM budget sends requests in parallel on purpose, and
+against parallel requests a read-then-write limiter has roughly no effect.
+
+The decision is now one statement inside Postgres (`consume_rate_limit()` in
+`supabase/schema.sql`):
+
+```sql
+insert into rate_limits (key, window_start, count) values (…, 1)
+on conflict (key) do update set count = case … least(rl.count + 1, p_limit + 1) end
+returning …
+```
+
+`ON CONFLICT DO UPDATE` takes a row lock, so concurrent callers are serialised
+by the database. The stored count is capped at `limit + 1`, which keeps it
+bounded under a flood and — because a denial always stores `limit + 1` while the
+last admitted request stores `limit` — makes "was this allowed" decidable from
+the returned row alone, with no second query.
+
+`evaluateRateLimit` in `lib/rateLimit.js` survives as the reference model of the
+same rule, written as a pure function so the rule stays readable. It is not in
+the request path; `tests/sql.test.js` runs it and the SQL over the same sequence
+of calls and fails if they disagree. Two tests carry the argument: one re-enacts
+the old read-then-write race deterministically and shows two requests admitted
+against a limit of one, and one fires 24 concurrent calls at a limit of 8 and
+asserts that exactly 8 are admitted.
+
+## Billing: kept, but moved entirely to the server
+
+The honest option was to delete the billing page. A portfolio project does not
+need to take money, and a payment flow nobody has exercised against a live
+sandbox is a liability. It was kept for one reason: credits are not decoration
+here, they are the app's only limit on who may spend the project's LLM budget,
+so "who is allowed to generate an interview" is a real access-control question
+whether or not any money changes hands. Deleting the page would have removed the
+button and left the question unanswered.
+
+### What was wrong
+
+`PayButton.onApprove` added credits from the browser:
+
+```js
+await supabase.from("Users").update({ credits: Number(user?.credits) + credits })
+```
+
+Nothing verified that PayPal had taken any money — `onApprove` fires on the
+client and its argument is not proof of payment — and the amount was whichever
+number the component happened to hold. Worse, the same write was reachable
+without PayPal at all. Row level security permitted it: the policy checked that
+the row was the caller's own, which it was. Any signed-in user could paste
+`supabase.from("Users").update({ credits: 999999 }).eq("email", myEmail)` into
+the console and be done.
+
+That is verified in both directions. Against the pre-fix schema the update
+succeeds and sets the balance to 999999; against the current one Postgres
+refuses it with SQLSTATE 42501, and `tests/sql.test.js` asserts exactly that.
+
+### What replaces it
+
+- **The client sends an order id and nothing else that matters.** Identity comes
+  from the verified Supabase JWT, not the request body.
+- **The server captures the order with PayPal** and reads the amount from
+  `purchase_units[0].payments.captures[0]` — the money actually taken, not the
+  amount that was requested — then matches it against the plan table. An order
+  for one cent matches no plan and buys nothing, which is why it is safe to let
+  the browser create the order in the first place.
+- **Granting is idempotent on a primary key.** The PayPal order id *is* the key
+  of `credit_purchases`, and `grant_purchased_credits()` inserts the ledger row
+  and adds the credits in one transaction. A replay loses the insert and adds
+  nothing. This is deliberately not an application-level "have I seen this
+  before" check, because two simultaneous replays would both pass one. Twelve
+  concurrent captures of one order id are tested; exactly one grants.
+- **Credits are outside the column grants.** No browser role can write them by
+  any route, which also meant the *spending* path had to move: creating an
+  interview is now `create_interview()`, one transaction that spends the credit
+  and inserts the row, or does neither. That closed a second hole — the old code
+  inserted the interview and then decremented in a separate request whose failure
+  was logged and ignored, so a recruiter who simply never sent the second request
+  was never charged.
+
+### What is not verified
+
+No order has been captured against a live PayPal sandbox, because that needs a
+PayPal developer account. The verification path is tested end to end with the
+PayPal client stubbed against recorded response shapes, and the OAuth request
+shape was confirmed against `api-m.sandbox.paypal.com` — it answers
+`invalid_client`, meaning the request parsed and only the credentials were
+wrong. That is the honest boundary: the logic is tested, the integration is not.
+
+`PAYPAL_ENV` is strict about this: `live` is the only value that selects the
+live API and anything else falls back to sandbox. The failure modes are not
+symmetrical. Accidentally running sandbox in production means real orders cannot
+be captured and nobody gets credits — visible immediately. Accidentally running
+live means taking real money. Only the first is reachable by a typo.
+
+## Shareable reports: a link is a credential, so it is a narrow one
+
+A recruiter usually needs to show a report to a colleague who has no account.
+The alternative to a link is an account for every reviewer, which nobody wants.
+
+The link is the whole credential, so the design gives it as little to work with
+as possible: a UUIDv4 (122 random bits from the platform CSPRNG), looked up by
+equality on a unique partial index, never listed. There is no endpoint that
+returns more than one report, so a leaked link is exactly one report and reveals
+nothing about any other. It expires after fourteen days, and it can be revoked
+before that. The token is validated as a UUID before any query runs, so a
+malformed token never becomes a database round trip.
+
+What a token deliberately does *not* do is authenticate anyone. Whoever holds
+the link sees the assessment, which is why the public route returns the
+candidate's name and the scores and withholds e-mail addresses — the private
+view shows those, the shared one does not. Both views render the same component
+(`components/ReportBody.jsx`), because a shared report showing different numbers
+from the private one would be worse than no sharing at all.
+
+The expired case answers 410 rather than 404. That does confirm a token once
+existed, but the holder of a stale link needs to know to ask for a new one, and
+confirming the existence of a 122-bit secret to somebody who already has it
+tells an attacker nothing.
+
+## Configuration is checked when the server starts
+
+The README used to claim the app "throws on startup naming anything that is
+missing". It did not. `requireEnv` was only reached when a request built a
+client, so a deployment with no service-role key looked healthy and failed on
+the first user who needed it, and `NEXT_PUBLIC_HOST_URL` was never checked at
+all.
+
+`instrumentation.js` now calls `assertServerEnv()` when the server process
+starts. A production server refuses to start and lists everything missing; a
+development server prints the same list and starts anyway. That asymmetry is
+deliberate rather than lazy: it is what lets
+`cp .env.example .env.local && npm run dev` render the whole product on
+placeholder values, so somebody evaluating the project can look around before
+opening four accounts. The build is exempt in both cases, because compiling a
+bundle makes no network calls and a build that demands production credentials is
+a build nobody can run.
 
 ## Ownership is enforced in Postgres, not in the client
 
@@ -115,14 +264,24 @@ descriptions and question lists included — because RLS cannot require a client
 to filter by id.
 
 So anonymous access was removed entirely. `supabase/schema.sql` grants the
-`anon` role nothing on `Interviews`, `interview-feedback` or `rate_limits`, and
-the candidate's two touchpoints run server-side with the service role key:
+`anon` role nothing on any table, and the candidate's touchpoints run
+server-side with the service role key:
 
 - `app/api/interview/[interview_id]/route.js` returns exactly the one row the
   link names, and only the fields a candidate should see.
 - `app/api/ai-feedback/route.js` writes the completed report, so no client needs
   write access to the feedback table and a report can only be filed against an
   interview that exists.
+- `app/api/report/[token]/route.js` answers a shared link, for a viewer who has
+  no account at all.
+
+Two things RLS could not do, which is why they are privileges rather than
+policies. A policy decides *which rows* a role may touch, never *which columns*
+— so the credit column had to be removed from the grant itself. And Supabase's
+default privileges grant `EXECUTE` on new functions to `anon` and
+`authenticated`, which a `revoke … from public` does **not** undo; without
+naming those roles explicitly, the function that adds credits stayed callable
+from the browser. That one was caught by a test, not by reading.
 
 Recruiter reads still go straight from the browser to Supabase, which is the
 intended pattern — RLS scopes them to `userEmail = auth.jwt() ->> 'email'`.
@@ -143,6 +302,14 @@ Only one provider is implemented. Supporting Groq and Gemini behind a provider
 interface would be a reasonable design, but two providers half-tested is worse
 than one that works, so the seam is an environment variable rather than an
 abstraction.
+
+Model ids go stale, and this project has already been bitten: Groq retired
+`llama-3.3-70b-versatile` on 2026-08-16 and the default was left pointing at it,
+so a fresh clone got a 404 on its first question. The default is now
+`openai/gpt-oss-120b` — on Groq's current production list, and one of the models
+that supports the JSON mode this code depends on. That was checked against
+Groq's published list rather than by calling the API, since no key was available
+here, and `LLM_MODEL` overrides it when the list moves again.
 
 Current Groq rate limits are published at
 <https://console.groq.com/docs/rate-limits>; no figure is quoted here because a
