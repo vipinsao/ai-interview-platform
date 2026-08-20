@@ -144,6 +144,47 @@ the old read-then-write race deterministically and shows two requests admitted
 against a limit of one, and one fires 24 concurrent calls at a limit of 8 and
 asserts that exactly 8 are admitted.
 
+### Atomic is not the same as engaged: the key has to be one the caller cannot choose
+
+An exact counter is worth nothing if the caller picks which counter to
+increment. All three unauthenticated routes consumed the budget *before*
+resolving the identifier it was keyed on — two on a session token that was only
+shape-checked as a UUIDv4, one on a path segment that was not checked at all.
+`consume_rate_limit` is an upsert, so a key it has never seen becomes a new row
+with a count of one: a fresh random UUID per request bought a brand new
+120-request budget every time and left a permanent counter row behind. The
+limiter restrained exactly one class of caller, the honest one, whose token is
+stable.
+
+The reasoning for that ordering was written down and is worth quoting, because
+it sounds right: consuming first meant an unknown token could not buy unmetered
+database reads. It inverts the control. Resolving first costs an unknown token
+one indexed primary-key lookup — no model call, no write, no row — while
+consuming first cost a row *and* a budget. The budget belongs to something that
+exists.
+
+`lib/server/gate.js` now holds the ordering as one named function,
+`resolveThenConsume`, so three routes cannot drift apart again, and the counter
+is keyed on the identifier the database returned rather than the one the caller
+sent.
+
+### The counters expire, swept by the traffic that creates them
+
+There was no `DELETE` against `rate_limits` anywhere in the repository. Every
+distinct key was a permanent row, and this app has no cron, no queue and no
+worker — every write happens inside a request — so "add a scheduled cleanup" was
+not an available answer.
+
+`consume_rate_limit` sweeps instead: up to 50 counters older than 24 hours per
+call, index-assisted and `for update skip locked`, so the table is drained by
+the traffic that fills it and two concurrent callers never queue behind each
+other for the same doomed row. The key being consumed is excluded from the
+sweep by hand — two data-modifying CTEs in one statement do not see each other's
+effects, so a delete racing an upsert over one key would commit the delete and
+lose the count. `prune_rate_limits()` is the unbounded version for an existing
+backlog, wired to `npm run prune:rate-limits` and callable by the service role
+only.
+
 ## Billing: kept, but moved entirely to the server
 
 The honest option was to delete the billing page. A portfolio project does not
@@ -189,6 +230,18 @@ refuses it with SQLSTATE 42501, and `tests/sql.test.js` asserts exactly that.
   nothing. This is deliberately not an application-level "have I seen this
   before" check, because two simultaneous replays would both pass one. Twelve
   concurrent captures of one order id are tested; exactly one grants.
+- **Nothing inside that transaction may refuse a payment that already
+  happened.** It used to: with no `Users` row for the buyer the function raised
+  `P0002`, which rolled the ledger insert back with it. The capture had already
+  been taken at PayPal, so that was money taken and nothing recorded — and
+  because the ledger row died in the same aborted transaction, there was nothing
+  for a retry to find. Every attempt failed in the identical place, for ever.
+  The profile row is created best effort from the browser with its failure only
+  logged, so this was reachable, not theoretical. The function creates the row
+  now: the email comes from the verified JWT, and it is the same row with the
+  same default balance the browser would have inserted. The database test that
+  covered this asserted the wrong thing — *"the ledger row must roll back with
+  the grant"* — which is why it survived a review and two audits.
 - **Credits are outside the column grants.** No browser role can write them by
   any route, which also meant the *spending* path had to move: creating an
   interview is now `create_interview()`, one transaction that spends the credit

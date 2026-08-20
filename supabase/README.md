@@ -37,6 +37,7 @@ grants:
 | `Interviews` insert | granted to `authenticated` | revoked — use `create_interview()` |
 | `interview-feedback` write | granted to `authenticated` | revoked — server only |
 | `rate_limits`, `credit_purchases` | default Supabase grants | revoked from `anon` and `authenticated` |
+| `rate_limits` rows | kept for ever — nothing deleted from this table | swept by `consume_rate_limit` (50 rows older than 24h per call) and by `prune_rate_limits()` |
 | `interview_sessions`, `answer_scores` | did not exist | new; server-only, no client access |
 
 The application in this repository is written against the *after* column. An
@@ -50,6 +51,13 @@ Paste the file into the Supabase SQL editor and run it. It is idempotent:
 `create table if not exists`, `create or replace function`, `drop policy if
 exists` before each `create policy`, and the one new constraint is added inside
 a guard and marked `not valid` so historic rows cannot block the migration.
+
+`consume_rate_limit` keeps its four-argument signature deliberately. Adding a
+parameter to a function does not replace it — it creates a second overload
+beside the first and leaves the `grant execute` at the foot of this file
+pointing at the old one. The retention window and batch size for the counter
+sweep are literals inside it for that reason; `prune_rate_limits(now, retain_ms)`
+takes both as arguments for the cases that need them.
 
 ## Was this ever applied to the live database?
 

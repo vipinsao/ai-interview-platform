@@ -492,13 +492,14 @@ concurrent submissions of the same answer.
 | **Browser has no SpeechRecognition** (Firefox), mic denied, recognition errors, candidate silent | Each is a named transition in the reducer into a state the UI renders — typed fallback, retry, or skip. There is no "spinner with no way forward" state. | `lib/interviewMachine.js:86-107` |
 | **Page refreshed mid-interview** | Session ends: name, token and questions live in React context. Scores already issued survive, because they were written server-side as they were issued; the interview cannot be resumed. | `context/InterviewDataContext.jsx`, README "Notes and limitations" |
 
-**The one failure mode with no recovery path:** if PayPal captures successfully
-and `grant_purchased_credits` then raises `P0002 no Users row for %`
-(`schema.sql:315-317`), the whole function rolls back — including the ledger
-insert — the route returns 500, and the money has been taken. A retry re-captures
-(422 → read back) and raises `P0002` again, identically, forever. The `Users` row
-is created best-effort from the browser and its failure is only logged
-(`app/provider.jsx:54-57`), so this is reachable rather than theoretical. See §9.
+**The failure mode that used to have no recovery path — fixed.** If PayPal
+captured successfully and `grant_purchased_credits` then raised `P0002 no Users
+row for %`, the whole function rolled back, ledger insert included, and the
+money had been taken with nothing recorded. Every retry followed the identical
+path and failed in the identical place. `grant_purchased_credits` now creates
+the profile row instead of raising — same row, same default balance, that the
+browser's best-effort upsert (`app/provider.jsx:54-57`) would have inserted. See
+§9.2.
 
 ---
 
@@ -506,9 +507,12 @@ is created best-effort from the browser and its failure is only logged
 
 - **It has no scheduled work of any kind.** No cron, no queue, no worker. Every
   write happens inside a request.
-- **Consequently `rate_limits` is never cleaned up.** There is no `DELETE`
-  against that table anywhere in the repository — see §9, because the keys are
-  partly attacker-chosen.
+- **`rate_limits` is therefore cleaned up by the requests themselves.**
+  `consume_rate_limit` sweeps up to 50 counters older than 24 hours on each
+  call, which is what keeps the table flat without a scheduler; the unbounded
+  version, `prune_rate_limits()`, is there for a backlog and is wired to
+  `npm run prune:rate-limits`. See §9.1 — before this, nothing deleted from that
+  table at all.
 - **It cannot revoke a JWT.** Sign-out is Supabase's; a token stays valid for its
   own lifetime, and there is no server-side session store to consult.
 - **In-process state that does not survive a second instance:** the PayPal OAuth
@@ -544,56 +548,86 @@ is created best-effort from the browser and its failure is only logged
 
 ---
 
-## 9. Defects found while writing this document
+## 9. Defects found while writing this document — and fixed
 
-### 9.1 `rate_limits` grows without bound, from unauthenticated callers
+### 9.1 The rate limiter did not engage against a caller who varied the key — FIXED
 
-The limiter table has a row per key and **nothing ever deletes a row** — there
-is no `DELETE FROM public.rate_limits` anywhere in the repository (grep across
-`app/`, `lib/`, `supabase/`, `scripts/`; the only non-test references are the
-schema definition at `schema.sql:68-72`, the upsert at `schema.sql:186`, and the
-privilege lines).
-
-That would be fine if keys were bounded. Two of them are not:
+The limiter table had a row per key and **nothing ever deleted a row** — there
+was no `DELETE FROM public.rate_limits` anywhere in the repository. That would
+be fine if keys were bounded. Three of them were not:
 
 | Route | Key | Bounded by |
 | --- | --- | --- |
-| `POST /api/score-answer` | `score-answer:<sessionToken>` (`score-answer/route.js:64`) | nothing — the token is only shape-checked as a UUIDv4 (`route.js:55`), and the limiter is consumed **before** the session is looked up (`route.js:59-66`) |
-| `POST /api/ai-feedback` | `ai-feedback:<sessionToken>` (`ai-feedback/route.js:74`) | same |
-| `POST /api/interview/<id>/session` | `interview-session:<id>` (`session/route.js:46`) | nothing — the path segment is not validated at all before the limiter runs (`route.js:34,45-48`) |
+| `POST /api/score-answer` | `score-answer:<sessionToken>` | nothing — the token was only shape-checked as a UUIDv4, and the limiter was consumed **before** the session was looked up |
+| `POST /api/ai-feedback` | `ai-feedback:<sessionToken>` | same |
+| `POST /api/interview/<id>/session` | `interview-session:<id>` | nothing — the path segment was not validated at all before the limiter ran |
 
-So an anonymous caller can mint a fresh random UUID per request and get both a
-permanent new row *and* a fresh 120-request budget, meaning the limiter never
-engages against them. The `interview-session` key is worse: it is not even
-required to be a UUID, so the key is an arbitrary path segment.
+`consume_rate_limit` is an `INSERT … ON CONFLICT`, so a key it has never seen
+becomes a new row with a count of one. An anonymous caller minting a fresh
+random UUID per request therefore got a permanent new row *and* a fresh
+120-request budget every time: **the limiter never engaged against them**, and
+the only party it restrained was the honest one, whose token is stable. That
+defeats the control the credits work names as the real spend gate.
 
-Consuming before the lookup is itself deliberate and correct — the comment at
-`score-answer/route.js:59-60` says it is so that an unknown token cannot be used
-to make unmetered database reads. The defect is the missing other half: the
-counter table needs a sweep, and the unauthenticated endpoints need a key that
-an attacker cannot vary freely (the client IP, or the interview id *after* it
-has been shown to exist).
+Consuming before the lookup was deliberate — the comment said it was so that an
+unknown token could not buy unmetered database reads. It inverts the control.
+Resolving first costs an unknown token one indexed primary-key lookup and
+nothing else; consuming first cost a row and a budget.
 
-Worth noting as a contrast: `rate_limits.key` is `text` with no length bound,
-and it is the primary key. A key longer than the btree limit (~2704 bytes) makes
-the upsert raise, which `consumeRateLimit` turns into
-`RateLimitUnavailableError` and the route into a 503 — an availability answer to
-what is really a validation problem.
+**Fixed** in two halves.
 
-### 9.2 A captured payment can be unrecoverably lost
+*Ordering.* `lib/server/gate.js` holds it as one named function,
+`resolveThenConsume`, which resolves the subject and only then spends the
+budget, keyed on the identifier the **database** returned rather than the one
+the caller sent. All three routes go through it, so they cannot drift apart
+again, and the session route now validates its path segment as a UUIDv4 before
+any query at all. `consume` is the only thing that writes to `rate_limits`, so
+"an unknown key never reaches `consume`" is the same statement as "an unknown
+key writes no row"; `tests/gate.test.js` asserts both, and asserts a known token
+is still limited exactly at its limit.
 
-Documented as a failure mode in §7 and repeated here because it involves money.
-`grant_purchased_credits` raises `P0002` when there is no `Users` row for the
-email (`schema.sql:315-317`). Because the whole function is one transaction, the
-`credit_purchases` insert rolls back with it — so nothing records that the money
-was taken, and every retry follows the identical path (`findPurchase` → null →
-`captureOrder` → 422 → read back → `grantCredits` → `P0002` → 500).
+*Expiry.* `consume_rate_limit` now sweeps up to 50 counters older than 24 hours
+on every call — index-assisted by `rate_limits_window_start_idx` and
+`for update skip locked`, so concurrent callers never queue behind each other
+for the same doomed row. `p_key` is excluded from the sweep on purpose: two
+data-modifying CTEs in one statement do not see each other's effects, so a
+delete racing an upsert over the same key would commit the delete and lose the
+count. `prune_rate_limits()` clears an accumulated backlog in one call and is
+service-role only. Sweeping from the traffic that fills the table is what makes
+this work in a deployment with no scheduler, which is the deployment described
+in §8.
+
+Still true, and not fixed: `rate_limits.key` is `text` with no length bound and
+it is the primary key. A key longer than the btree limit (~2704 bytes) makes the
+upsert raise, which becomes a 503 — an availability answer to a validation
+problem. The keys are now server-issued UUIDs, so nothing reachable produces
+one, but the bound is still not stated in the schema.
+
+### 9.2 A captured payment could be unrecoverably lost — FIXED
+
+`grant_purchased_credits` raised `P0002` when there was no `Users` row for the
+email. Because the whole function is one transaction, the `credit_purchases`
+insert rolled back with it — so nothing recorded that the money had been taken,
+and every retry followed the identical path (`findPurchase` → null →
+`captureOrder` → 422 → read back → `grantCredits` → `P0002` → 500). Money taken,
+nothing recorded, permanently unrecoverable.
 
 The `Users` row is created from the browser on first load and its failure is
 logged and swallowed (`app/provider.jsx:54-57`), so "signed in but no profile
-row" is a state the app can genuinely be in. The narrow fix is to record the
-purchase even when the balance cannot be moved — or to upsert the `Users` row
-inside `grant_purchased_credits` rather than raising.
+row" is a state the app can genuinely be in.
+
+**Fixed** by creating the profile row instead of raising. The email comes from
+the verified JWT; the row created is the same one, with the same default
+balance, the browser's own upsert would have inserted, and that upsert fills in
+name and picture the next time it runs. The `P0002` raise remains as a guard on
+a state the insert above makes unreachable, and it is now safe to reach anyway:
+`captureOrder` answers `ORDER_ALREADY_CAPTURED` by reading the order back, so a
+retry arrives with the same facts rather than paying twice.
+
+The existing database test asserted the defect — *"the ledger row must roll back
+with the grant"* — which is how this survived a review and two security audits.
+It is replaced by two cases: a payment for an email with no profile row is
+recorded and credited, and a replay of it still grants nothing extra.
 
 ### 9.3 One test asserts against a role name that is not guaranteed
 
