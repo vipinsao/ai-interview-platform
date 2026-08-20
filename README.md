@@ -69,6 +69,11 @@ accuracy of the model's scoring. Both say so where they appear.
 
 ## How it works
 
+[ARCHITECTURE.md](./ARCHITECTURE.md) is the system-architecture document —
+the privilege map (anon vs authenticated vs service_role), trust boundaries,
+the ER diagram, the four atomicity guarantees and the honest scope limits.
+This section is the narrative version.
+
 A signed-in recruiter fills in the role, description, duration and interview types on `/dashboard/create-interview`; `QuestionList.jsx` posts that to `app/api/ai-model/route.js` with the Supabase session JWT in an `Authorization` header, and the route verifies the token, spends one unit of that user's hourly rate limit, calls the model, and validates the reply against `questionListSchema` before returning it — a malformed reply is retried once and then refused rather than shown. The questions are stored by calling the `create_interview()` Postgres function, which spends one credit and writes the row in a single transaction under the recruiter's verified email, and the interview becomes a `/interview/<uuid>` link.
 
 A candidate opening that link is not signed in, so `app/interview/[interview_id]/page.jsx` reads the interview through `app/api/interview/[interview_id]/route.js` instead of querying Supabase directly — row level security denies anonymous reads of the table, and the route hands back the role and the duration for the join screen, and nothing else. Entering a name posts to `app/api/interview/[interview_id]/session/route.js`, which records a session, mints the token every later request is identified by, and only then releases the questions. The session itself (`app/interview/[interview_id]/start/`) uses the browser's own Web Speech API: `speechSynthesis` reads each question aloud and `SpeechRecognition` captures the spoken answer, both wired up in `hooks/useSpeech.js`. There is no voice vendor and no key in the client.
