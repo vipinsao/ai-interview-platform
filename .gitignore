@@ -42,3 +42,5 @@ next-env.d.ts
 
 
 /backend/node_modules
+# ...but the template is meant to be committed
+!.env.example
