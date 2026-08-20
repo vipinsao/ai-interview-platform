@@ -1,52 +1,71 @@
 "use client";
 import { UserDetailContext } from "@/context/UserDetailContext";
 import { supabase } from "@/services/supabaseClient";
-import { PayPalScriptProvider } from "@paypal/react-paypal-js";
 
-import React, { useContext, useEffect, useState } from "react";
+import React, { useCallback, useContext, useEffect, useState } from "react";
 
+/**
+ * The PayPal script provider used to live here, which meant every visitor —
+ * including an anonymous candidate taking an interview — downloaded and
+ * executed a third-party payments SDK. It is now mounted by the billing page,
+ * the only page that can spend money.
+ */
 function Provider({ children }) {
   const [user, setUser] = useState(null);
 
-  useEffect(() => {
-    createNewUser();
+  const loadOrCreateUser = useCallback(async () => {
+    const {
+      data: { user: account },
+    } = await supabase.auth.getUser();
+    if (!account?.email) return;
+
+    const { data: existing, error } = await supabase
+      .from("Users")
+      .select("*")
+      .eq("email", account.email)
+      .maybeSingle();
+
+    if (error) {
+      console.error("[provider] could not read the profile:", error.message);
+      return;
+    }
+    if (existing) {
+      setUser(existing);
+      return;
+    }
+
+    // .insert() alone resolves with data: null, so this used to set the user to
+    // null immediately after creating them — the app then behaved as though
+    // nobody was signed in until the next reload. The row has to be selected
+    // back. `credits` is not sent: the column is not writable by a browser, and
+    // the database default is the starting balance.
+    const { data: created, error: insertError } = await supabase
+      .from("Users")
+      .insert([
+        {
+          name: account.user_metadata?.name,
+          email: account.email,
+          picture: account.user_metadata?.picture,
+        },
+      ])
+      .select()
+      .single();
+
+    if (insertError) {
+      console.error("[provider] could not create the profile:", insertError.message);
+      return;
+    }
+    setUser(created);
   }, []);
 
-  //   useEffect(() => {
-  //     console.log("User", user); // ✅ This runs when `user` state changes
-  //   }, [user]);
+  useEffect(() => {
+    loadOrCreateUser();
+  }, [loadOrCreateUser]);
 
-  const createNewUser = () => {
-    supabase.auth.getUser().then(async ({ data: { user } }) => {
-      // check if user exists or not
-      let { data: Users, error } = await supabase
-        .from("Users")
-        .select("*")
-        .eq("email", user?.email);
-      console.log(Users);
-      if (Users?.length === 0) {
-        const { data, error } = await supabase.from("Users").insert([
-          {
-            name: user?.user_metadata?.name,
-            email: user?.email,
-            picture: user?.user_metadata?.picture,
-          },
-        ]);
-        console.log(data);
-        setUser(data);
-        return;
-      }
-      setUser(Users[0]);
-    });
-  };
   return (
-    <PayPalScriptProvider
-      options={{ clientId: process.env.NEXT_PUBLIC_PAYPAL_CLIENT_ID }}
-    >
-      <UserDetailContext.Provider value={{ user, setUser }}>
-        <div>{children}</div>
-      </UserDetailContext.Provider>
-    </PayPalScriptProvider>
+    <UserDetailContext.Provider value={{ user, setUser }}>
+      <div>{children}</div>
+    </UserDetailContext.Provider>
   );
 }
 
