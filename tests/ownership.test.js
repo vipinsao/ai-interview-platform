@@ -31,3 +31,22 @@ test("an anonymous caller is never handed an interview", () => {
     "unauthenticated"
   );
 });
+
+test("a row with no userEmail column is refused, not waved through", () => {
+  // This helper exists to catch a query that forgets its owner filter. A guard
+  // on `typeof owner === "string"` meant a missing column skipped the check
+  // entirely — the one case it was written for.
+  const result = resolveOwnedInterview([{ jobPosition: "Dev" }], {
+    userEmail: "owner@example.com",
+  });
+  assert.equal(result.status, "forbidden");
+});
+
+test("a row whose owner is null or undefined is refused", () => {
+  for (const userEmail of [null, undefined, "", 0]) {
+    const result = resolveOwnedInterview([{ userEmail }], {
+      userEmail: "owner@example.com",
+    });
+    assert.equal(result.status, "forbidden", `owner ${String(userEmail)} must be refused`);
+  }
+});
