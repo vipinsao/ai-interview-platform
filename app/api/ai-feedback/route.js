@@ -1,12 +1,20 @@
 /**
- * Builds the end-of-interview report from answers that have already been
- * scored one by one.
+ * Builds the end-of-interview report.
  *
- * The numbers are computed here in JavaScript (lib/score.js), not asked of the
- * model: the same answers must always produce the same rating, and a recruiter
- * has to be able to trace a figure back to the answers behind it. Only the
- * prose summary is generated, and if that call fails the report is still
- * returned with its ratings intact.
+ * This route used to accept the answers — questions, transcripts and scores —
+ * in the request body, and do arithmetic over them. Since the interview flow is
+ * deliberately anonymous, that meant anybody holding an invite link could POST
+ * a set of tens and a name, never call the scoring endpoint at all, and land a
+ * 10/10 report card with attacker-authored text on the recruiter's dashboard.
+ *
+ * `lib/score.js` describes its arithmetic as deterministic, and it is. That was
+ * never the property under attack: determinism is not provenance, and
+ * arithmetic over numbers the candidate chose is reliably wrong.
+ *
+ * The request now carries a session token and nothing else. The questions come
+ * from the interview, the scores come from the rows /api/score-answer wrote
+ * when it issued them, and the candidate's name comes from the session created
+ * when they joined.
  */
 import { NextResponse } from "next/server";
 import { z } from "zod";
@@ -14,9 +22,16 @@ import { z } from "zod";
 import { SUMMARY_PROMPT, fillTemplate } from "@/lib/prompts";
 import { summarySchema } from "@/lib/schemas";
 import { aggregateScores } from "@/lib/score";
+import { buildPerQuestion, describeScores } from "@/lib/report";
 import { GENERATION_LIMIT, rateLimitKey } from "@/lib/rateLimit";
+import { isUuidV4 } from "@/lib/tokens";
 import { completeStructured } from "@/lib/server/llm";
-import { findInterview, saveFeedback } from "@/lib/server/interviews";
+import { saveFeedback } from "@/lib/server/interviews";
+import {
+  findSessionWithInterview,
+  listAnswerScores,
+  markSessionSubmitted,
+} from "@/lib/server/sessions";
 import { jsonError } from "@/lib/server/http";
 import {
   consumeRateLimit,
@@ -25,21 +40,8 @@ import {
 } from "@/lib/server/rateLimit";
 import { MissingConfigError } from "@/lib/server/env";
 
-const answerSchema = z.object({
-  question: z.string().max(2000).default(""),
-  type: z.string().max(100).default(""),
-  transcript: z.string().max(20000).default(""),
-  score: z.number().min(0).max(10).nullable().default(null),
-  strengths: z.array(z.string()).default([]),
-  gaps: z.array(z.string()).default([]),
-  suggestedImprovement: z.string().default(""),
-});
-
 const requestSchema = z.object({
-  interview_id: z.string().trim().min(1).max(100),
-  userName: z.string().trim().min(1).max(200),
-  userEmail: z.string().trim().max(320).default(""),
-  answers: z.array(answerSchema).min(1).max(50),
+  sessionToken: z.string().trim(),
 });
 
 const SYSTEM =
@@ -58,21 +60,18 @@ export async function POST(request) {
   try {
     body = requestSchema.parse(await request.json());
   } catch {
-    return jsonError(
-      400,
-      "Provide interview_id, userName and a non-empty answers array."
-    );
+    return jsonError(400, "Provide the interview session token.");
   }
 
-  const interview = await findInterview(body.interview_id);
-  if (!interview) {
-    return jsonError(404, "That interview link is not valid.");
+  if (!isUuidV4(body.sessionToken)) {
+    return jsonError(404, "That interview session is not valid.");
   }
 
+  // Keyed on the session, so one candidate cannot exhaust another's budget.
   let decision;
   try {
     decision = await consumeRateLimit(
-      rateLimitKey("ai-feedback", body.interview_id),
+      rateLimitKey("ai-feedback", body.sessionToken),
       GENERATION_LIMIT
     );
   } catch (error) {
@@ -90,21 +89,26 @@ export async function POST(request) {
   if (!decision.allowed) {
     return jsonError(
       429,
-      `This interview has used its report budget for the hour. Try again in ${decision.retryAfterSeconds} seconds.`,
+      `This session has used its report budget for the hour. Try again in ${decision.retryAfterSeconds} seconds.`,
       headers
     );
   }
 
-  const { answered, overall, rating } = aggregateScores(body.answers);
+  const found = await findSessionWithInterview(body.sessionToken);
+  if (!found) {
+    return jsonError(404, "That interview session is not valid.", headers);
+  }
+  const { session, interview } = found;
 
-  const scoredAnswers = body.answers
-    .map(
-      (answer, index) =>
-        `${index + 1}. [${answer.type || "General"}] ${answer.question}\n   score: ${
-          answer.score === null ? "not scored" : `${answer.score}/10`
-        }`
-    )
-    .join("\n");
+  // A resubmitted session is answered from what was already filed, without a
+  // second report row and without spending another model call.
+  if (session.submitted_at) {
+    return NextResponse.json({ saved: true, alreadySubmitted: true }, { headers });
+  }
+
+  const scores = await listAnswerScores(session.session_token);
+  const perQuestion = buildPerQuestion(interview.questionList, scores);
+  const { answered, overall, rating } = aggregateScores(perQuestion);
 
   let summary = UNAVAILABLE_SUMMARY;
   let summaryGenerated = false;
@@ -114,7 +118,7 @@ export async function POST(request) {
       system: SYSTEM,
       prompt: fillTemplate(SUMMARY_PROMPT, {
         jobPosition: interview.jobPosition ?? "the role",
-        scoredAnswers,
+        scoredAnswers: describeScores(perQuestion),
       }),
       schema: summarySchema,
     });
@@ -125,11 +129,11 @@ export async function POST(request) {
   }
 
   const report = {
-    version: 2,
+    version: 3,
     summaryGenerated,
     answered,
     overall,
-    perQuestion: body.answers,
+    perQuestion,
     feedback: {
       rating,
       summary: summary.summary,
@@ -138,16 +142,14 @@ export async function POST(request) {
     },
   };
 
-  // Written here rather than from the browser so anonymous clients need no
-  // write access to the table, and so a report can only be filed against an
-  // interview that exists.
   try {
     await saveFeedback({
-      interviewId: body.interview_id,
-      userName: body.userName,
-      userEmail: body.userEmail,
+      interviewId: session.interview_id,
+      userName: session.user_name,
+      userEmail: session.user_email ?? "",
       feedback: report,
     });
+    await markSessionSubmitted(session.session_token);
   } catch (error) {
     console.error("[ai-feedback] could not store the report:", error.message);
     return jsonError(500, "Your answers could not be saved.", headers);

@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { useParams, useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { InterviewDataContext } from "@/context/InterviewDataContext";
+import { postJson } from "@/services/apiClient";
 
 function Interview() {
   const { interview_id } = useParams();
@@ -50,18 +51,33 @@ function Interview() {
     if (interview_id) getInterviewDetail();
   }, [interview_id, getInterviewDetail]);
 
-  const onJoinInterview = () => {
+  // Joining is a server call now. It mints the session token every later
+  // request is identified by — which is what stops one candidate spending
+  // another's rate limit budget — and it is where the questions are handed
+  // over, so they are released to somebody who has actually started rather
+  // than to anybody who curls the link.
+  const onJoinInterview = async () => {
     if (!interviewData) {
       toast.error("This interview link is no longer valid.");
       return;
     }
     setJoining(true);
-    setInterviewInfo({
-      userName: userName.trim(),
-      userEmail: userEmail.trim(),
-      interviewData,
-    });
-    router.push("/interview/" + interview_id + "/start");
+    try {
+      const result = await postJson(`/api/interview/${interview_id}/session`, {
+        userName: userName.trim(),
+        userEmail: userEmail.trim(),
+      });
+      setInterviewInfo({
+        userName: userName.trim(),
+        userEmail: userEmail.trim(),
+        sessionToken: result.sessionToken,
+        interviewData: result.interview,
+      });
+      router.push("/interview/" + interview_id + "/start");
+    } catch (error) {
+      setJoining(false);
+      toast.error(error.message ?? "This interview could not be started.");
+    }
   };
 
   // Submitting the form is the same action as pressing the button, so Enter in

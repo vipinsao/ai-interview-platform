@@ -37,6 +37,7 @@ function InterviewSession({ interviewInfo, interviewId }) {
   const finishingRef = useRef(false);
 
   const candidateName = interviewInfo.userName || "Candidate";
+  const sessionToken = interviewInfo.sessionToken;
   const question = currentQuestion(state);
 
   // Start once speech support is known, so the first question is delivered in
@@ -54,14 +55,17 @@ function InterviewSession({ interviewInfo, interviewId }) {
     dispatch({ type: "start" });
   }, [support.ready, support.recognition]);
 
+  // The question is identified by its index, not by its text. The server reads
+  // the question out of the interview's stored list, so this component cannot
+  // put words into the scoring prompt, and the score it gets back is one the
+  // server has already recorded against the session.
   const submitAnswer = useCallback(
-    async (transcript, questionAsked) => {
+    async (transcript, questionIndex) => {
       dispatch({ type: "submit_answer" });
       try {
         const score = await postJson("/api/score-answer", {
-          interview_id: interviewId,
-          question: questionAsked?.question ?? "",
-          questionType: questionAsked?.type ?? "Technical",
+          sessionToken,
+          questionIndex,
           answer: transcript,
         });
         dispatch({ type: "answer_scored", transcript, score });
@@ -70,7 +74,7 @@ function InterviewSession({ interviewInfo, interviewId }) {
       }
       setTypedAnswer("");
     },
-    [interviewId]
+    [sessionToken]
   );
 
   // Read the question out. Speech synthesis failing is not fatal — the
@@ -95,7 +99,9 @@ function InterviewSession({ interviewInfo, interviewId }) {
     if (state.status !== STATUS.LISTENING) return;
 
     let cancelled = false;
-    const asked = question;
+    // Captured now: scoring is asynchronous and the machine has moved on by the
+    // time it resolves.
+    const askedIndex = state.index;
     (async () => {
       const result = await listen({ silenceMs: SILENCE_MS });
       if (cancelled) return;
@@ -112,13 +118,13 @@ function InterviewSession({ interviewInfo, interviewId }) {
         dispatch({ type: "silence" });
         return;
       }
-      submitAnswer(result.transcript, asked);
+      submitAnswer(result.transcript, askedIndex);
     })();
 
     return () => {
       cancelled = true;
     };
-  }, [state.status, state.index, listen, submitAnswer, question]);
+  }, [state.status, state.index, listen, submitAnswer]);
 
   // Last answer is in. The endpoint scores, aggregates and stores the report;
   // the browser has no write access to the feedback table by design.
@@ -129,12 +135,10 @@ function InterviewSession({ interviewInfo, interviewId }) {
 
     (async () => {
       try {
-        await postJson("/api/ai-feedback", {
-          interview_id: interviewId,
-          userName: interviewInfo.userName,
-          userEmail: interviewInfo.userEmail ?? "",
-          answers: state.answers,
-        });
+        // The session token is the whole request. The questions, the scores and
+        // the candidate's name all come from what the server already recorded,
+        // so nothing this browser holds can decide what the report says.
+        await postJson("/api/ai-feedback", { sessionToken });
       } catch (error) {
         finishingRef.current = false;
         dispatch({
@@ -147,7 +151,7 @@ function InterviewSession({ interviewInfo, interviewId }) {
       dispatch({ type: "finished" });
       router.replace(`/interview/${interviewId}/completed`);
     })();
-  }, [state.status, state.answers, interviewId, interviewInfo, cancel, router]);
+  }, [state.status, sessionToken, interviewId, cancel, router]);
 
   const endInterview = () => {
     cancel();
@@ -234,7 +238,7 @@ function InterviewSession({ interviewInfo, interviewId }) {
         notice={state.notice}
         typedAnswer={typedAnswer}
         onTypedAnswerChange={setTypedAnswer}
-        onSubmitTyped={() => submitAnswer(typedAnswer.trim(), question)}
+        onSubmitTyped={() => submitAnswer(typedAnswer.trim(), state.index)}
         onListenAgain={() => dispatch({ type: "listen_again" })}
         onSwitchToTyping={() => {
           cancel();
