@@ -19,7 +19,7 @@ function InterviewDetails() {
     const { data, error } = await supabase
       .from("Interviews")
       .select(
-        `userEmail,jobPosition,jobDescription,questionList,type,duration,interview_id,created_at,interview-feedback(userEmail,userName,feedback,created_at)`
+        `userEmail,jobPosition,jobDescription,questionList,type,duration,interview_id,created_at,interview-feedback(id,userEmail,userName,feedback,created_at,share_token,share_expires_at)`
       )
       .eq("userEmail", user?.email)
       .eq("interview_id", interview_id);

@@ -1,4 +1,5 @@
-import React from "react";
+"use client";
+import React, { useState } from "react";
 import {
   Dialog,
   DialogContent,
@@ -8,28 +9,58 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { Progress } from "@/components/ui/progress";
-import { RATING_KEYS, averageRating } from "@/lib/score";
-
-const RATING_LABELS = {
-  technicalSkills: "Technical Skills",
-  communication: "Communication",
-  problemSolving: "Problem Solving",
-  experience: "Experience",
-};
-
-function initial(name) {
-  return (name || "?").charAt(0).toUpperCase();
-}
+import { toast } from "sonner";
+import moment from "moment/moment";
+import ReportBody from "@/components/ReportBody";
+import { shareLinkState, shareUrl } from "@/lib/share";
+import { postWithAuth } from "@/services/apiClient";
 
 function CandidateFeedbackDialog({ candidate }) {
-  const report = candidate?.feedback;
-  const feedback = report?.feedback;
-  const rating = feedback?.rating ?? {};
-  // Previously this summed four ratings without checking they existed, so a
-  // partial report rendered as "NaN/10".
-  const overall = averageRating(rating);
-  const perQuestion = Array.isArray(report?.perQuestion) ? report.perQuestion : [];
+  const [link, setLink] = useState(() =>
+    shareLinkState({
+      token: candidate?.share_token,
+      expiresAt: candidate?.share_expires_at,
+    }) === "valid"
+      ? { token: candidate.share_token, expiresAt: candidate.share_expires_at }
+      : null
+  );
+  const [busy, setBusy] = useState(false);
+
+  const onShare = async () => {
+    setBusy(true);
+    try {
+      const result = await postWithAuth("/api/feedback/share", {
+        feedbackId: candidate.id,
+      });
+      setLink({ token: result.token, expiresAt: result.expiresAt });
+      // The URL is rendered below as well, because clipboard access is refused
+      // on insecure origins and a silent failure would look like a broken button.
+      await navigator.clipboard
+        ?.writeText(shareUrl(window.location.origin, result.token))
+        .then(() => toast.success("Share link copied."))
+        .catch(() => toast.success("Share link created."));
+    } catch (error) {
+      toast.error(error.message ?? "That report could not be shared.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onRevoke = async () => {
+    setBusy(true);
+    try {
+      await postWithAuth("/api/feedback/share", {
+        feedbackId: candidate.id,
+        revoke: true,
+      });
+      setLink(null);
+      toast.success("Share link revoked.");
+    } catch (error) {
+      toast.error(error.message ?? "That link could not be revoked.");
+    } finally {
+      setBusy(false);
+    }
+  };
 
   return (
     <Dialog>
@@ -42,123 +73,59 @@ function CandidateFeedbackDialog({ candidate }) {
         <DialogHeader>
           <DialogTitle>Candidate report</DialogTitle>
           <DialogDescription asChild>
-            <div className="mt-5">
-              <div className="flex justify-between items-center">
-                <div className="flex items-center gap-5">
-                  <h2 className="bg-primary p-2 px-4.5 font-bold text-white text-sm rounded-full">
-                    {initial(candidate?.userName)}
-                  </h2>
-                  <div>
-                    <h2>{(candidate?.userName ?? "Unknown").toUpperCase()}</h2>
-                    <h2 className="text-sm text-gray-500">
-                      {candidate?.userEmail ?? "no email provided"}
-                    </h2>
-                  </div>
-                </div>
-                <h2 className="text-primary text-2xl font-bold">
-                  {overall === null ? "—" : `${overall}/10`}
-                </h2>
-              </div>
+            <div>
+              <ReportBody
+                userName={candidate?.userName}
+                subtitle={candidate?.userEmail ?? "no email provided"}
+                report={candidate?.feedback}
+                contact={
+                  candidate?.userEmail ? (
+                    <a href={`mailto:${candidate.userEmail}`}>
+                      <Button className="cursor-pointer">Email candidate</Button>
+                    </a>
+                  ) : null
+                }
+              />
 
-              <div className="mt-5">
-                <h2 className="font-bold">Skills assessment</h2>
-                <div className="mt-3 grid grid-cols-2 gap-6">
-                  {RATING_KEYS.map((key) => (
-                    <div key={key}>
-                      <h2 className="flex justify-between text-sm">
-                        {RATING_LABELS[key]}
-                        <span>
-                          {typeof rating[key] === "number"
-                            ? `${rating[key]}/10`
-                            : "—"}
-                        </span>
-                      </h2>
-                      <Progress
-                        value={
-                          typeof rating[key] === "number" ? rating[key] * 10 : 0
-                        }
-                        className={"mt-1"}
-                      />
-                    </div>
-                  ))}
-                </div>
-                <p className="text-xs text-gray-500 mt-2">
-                  Ratings are the mean of the per-answer scores below, grouped by
-                  question type.
+              <div className="mt-6 border-t pt-4">
+                <h3 className="font-bold text-sm">Share this report</h3>
+                <p className="text-xs text-gray-500 mt-1">
+                  Creates a read-only link that needs no account. It expires,
+                  and you can revoke it at any time.
                 </p>
-              </div>
-
-              <div className="mt-5">
-                <h2 className="font-bold">Performance summary</h2>
-                <div className="p-5 bg-secondary my-3 rounded-md">
-                  <p>{feedback?.summary ?? "No summary was recorded."}</p>
-                  {report?.summaryGenerated === false && (
-                    <p className="text-xs text-amber-700 mt-2">
-                      The written summary could not be generated for this
-                      session; the scores above are unaffected.
-                    </p>
+                {link && (
+                  <p className="text-xs mt-2 break-all">
+                    <span className="text-gray-600">
+                      Expires {moment(link.expiresAt).format("DD MMM, YYYY")}:
+                    </span>{" "}
+                    {shareUrl(
+                      typeof window === "undefined" ? "" : window.location.origin,
+                      link.token
+                    )}
+                  </p>
+                )}
+                <div className="flex gap-2 mt-3">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    disabled={busy}
+                    onClick={onShare}
+                    className="cursor-pointer"
+                  >
+                    {link ? "Copy link" : "Create share link"}
+                  </Button>
+                  {link && (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      disabled={busy}
+                      onClick={onRevoke}
+                      className="cursor-pointer text-red-700"
+                    >
+                      Revoke link
+                    </Button>
                   )}
                 </div>
-              </div>
-
-              {perQuestion.length > 0 && (
-                <div className="mt-5">
-                  <h2 className="font-bold">Answer by answer</h2>
-                  <div className="mt-3 flex flex-col gap-3">
-                    {perQuestion.map((answer, index) => (
-                      <div key={index} className="border rounded-md p-3">
-                        <div className="flex justify-between gap-3">
-                          <p className="font-medium text-sm">
-                            {index + 1}. {answer.question}
-                          </p>
-                          <span className="text-sm whitespace-nowrap">
-                            {typeof answer.score === "number"
-                              ? `${answer.score}/10`
-                              : "not scored"}
-                          </span>
-                        </div>
-                        {answer.transcript ? (
-                          <p className="text-xs text-gray-600 mt-2">
-                            “{answer.transcript}”
-                          </p>
-                        ) : (
-                          <p className="text-xs text-gray-500 mt-2">
-                            No answer recorded.
-                          </p>
-                        )}
-                        {answer.suggestedImprovement && (
-                          <p className="text-xs text-primary mt-2">
-                            Suggested improvement: {answer.suggestedImprovement}
-                          </p>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              <div
-                className={`p-5 mt-8 rounded-md flex justify-between items-center gap-4 ${
-                  feedback?.recommendation === "No" ? "bg-red-100" : "bg-green-100"
-                }`}
-              >
-                <div>
-                  <h2
-                    className={`font-bold ${
-                      feedback?.recommendation === "No"
-                        ? "text-red-700"
-                        : "text-green-700"
-                    }`}
-                  >
-                    Recommendation: {feedback?.recommendation ?? "—"}
-                  </h2>
-                  <p className="text-sm">{feedback?.recommendationMsg}</p>
-                </div>
-                {candidate?.userEmail && (
-                  <a href={`mailto:${candidate.userEmail}`}>
-                    <Button className="cursor-pointer">Email candidate</Button>
-                  </a>
-                )}
               </div>
             </div>
           </DialogDescription>
