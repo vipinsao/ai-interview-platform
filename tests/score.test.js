@@ -1,6 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { aggregateScores, averageRating, ratingKeyForType } from "../lib/score.js";
+import {
+  aggregateScores,
+  averageRating,
+  ratingKeyForType,
+  ratingProvenance,
+  RATING_KEYS,
+} from "../lib/score.js";
 
 test("maps question types onto rating buckets, case insensitively", () => {
   assert.equal(ratingKeyForType("Technical"), "technicalSkills");
@@ -45,4 +51,24 @@ test("averageRating ignores missing buckets", () => {
     averageRating({ technicalSkills: 8, communication: 6, problemSolving: undefined }),
     7
   );
+});
+
+test("a rating bucket says whether it was measured or inferred", () => {
+  const answers = [
+    { type: "Technical", score: 8 },
+    { type: "Technical", score: 6 },
+  ];
+  const provenance = ratingProvenance(answers);
+
+  assert.equal(provenance.technicalSkills, "measured");
+  // No behavioural, leadership, problem solving or experience questions were
+  // asked, so those three numbers are the overall mean wearing a label.
+  assert.equal(provenance.communication, "inferred");
+  assert.equal(provenance.problemSolving, "inferred");
+  assert.equal(provenance.experience, "inferred");
+});
+
+test("with nothing scored, no bucket claims to be anything", () => {
+  const provenance = ratingProvenance([{ type: "Technical", score: null }]);
+  for (const key of RATING_KEYS) assert.equal(provenance[key], "none");
 });
