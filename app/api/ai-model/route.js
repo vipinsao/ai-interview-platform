@@ -11,7 +11,9 @@ import { z } from "zod";
 import { QUESTIONS_PROMPT, fillTemplate } from "@/lib/prompts";
 import { questionListSchema } from "@/lib/schemas";
 import { GENERATION_LIMIT, rateLimitKey } from "@/lib/rateLimit";
+import { canSpendCredit } from "@/lib/credits";
 import { getUserFromRequest } from "@/lib/server/auth";
+import { creditsFor } from "@/lib/server/credits";
 import { completeStructured, StructuredOutputError } from "@/lib/server/llm";
 import { MissingConfigError } from "@/lib/server/env";
 import { jsonError } from "@/lib/server/http";
@@ -69,6 +71,26 @@ export async function POST(request) {
     return jsonError(
       429,
       `You have used all ${GENERATION_LIMIT.limit} question generations for this hour. Try again in ${decision.retryAfterSeconds} seconds.`,
+      headers
+    );
+  }
+
+  // The only credit check used to be in the browser, on the page before this
+  // one, so a recruiter with an empty balance could still spend the project's
+  // LLM budget by calling this endpoint directly. The balance is now read
+  // server-side, with the service-role key, before any model call.
+  let credits;
+  try {
+    credits = await creditsFor(user.email);
+  } catch (error) {
+    console.error("[ai-model] could not read the credit balance:", error.message);
+    return jsonError(503, "Question generation is temporarily unavailable.", headers);
+  }
+
+  if (!canSpendCredit(credits)) {
+    return jsonError(
+      402,
+      "You have no interview credits left. Buy more on the billing page.",
       headers
     );
   }
