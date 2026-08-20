@@ -38,6 +38,13 @@ jobs:
 
       - run: npm run lint
 
+      # Reports known advisories without gating the build. `npm audit` queries a
+      # live database, so a HIGH can appear with no change to this repository -
+      # a red build caused by someone else's disclosure schedule is noise, not
+      # signal. It stays visible in the log; it just does not fail the run.
+      - run: npm audit --audit-level=high
+        continue-on-error: true
+
       - run: npm test
         env:
           TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
