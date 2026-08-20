@@ -225,16 +225,44 @@ describe("supabase/schema.sql", { skip }, () => {
     );
   });
 
-  it("granting to an unknown user fails rather than silently doing nothing", async () => {
-    await assert.rejects(
-      () => grant(pool, "UNKNOWN-USER-ORDER", "nobody@example.com", 10),
-      /no Users row/
+  // This test used to assert the opposite - that granting to an email with no
+  // Users row raised, and that "the ledger row must roll back with the grant".
+  // Rolling it back is the defect. The capture has already happened at PayPal
+  // by the time this function runs, so a rollback here means money taken and
+  // nothing recorded, and because the ledger row is written in this same
+  // transaction there is nothing for a retry to find: every attempt fails in
+  // the same place for ever. The profile row is created best effort from the
+  // browser with its failures only logged, so the missing row is reachable.
+  it("a payment for an email with no profile row is recorded and credited, not rolled back", async () => {
+    const email = "no-profile@example.com";
+    const before = await pool.query(`select count(*)::int as n from public."Users" where email = $1`, [email]);
+    assert.equal(before.rows[0].n, 0, "this test needs an email with no profile row");
+
+    const row = await grant(pool, "NO-PROFILE-ORDER", email, 10);
+    assert.equal(row.granted, true);
+
+    const ledger = await pool.query(
+      "select credits_granted from public.credit_purchases where paypal_order_id = $1",
+      ["NO-PROFILE-ORDER"]
     );
-    const { rows } = await pool.query(
-      "select count(*)::int as n from public.credit_purchases where paypal_order_id = $1",
-      ["UNKNOWN-USER-ORDER"]
-    );
-    assert.equal(rows[0].n, 0, "the ledger row must roll back with the grant");
+    assert.equal(ledger.rows.length, 1, "the payment must be recorded");
+    assert.equal(ledger.rows[0].credits_granted, 10);
+
+    const { rows } = await pool.query(`select credits from public."Users" where email = $1`, [email]);
+    assert.equal(rows.length, 1, "the profile row is created rather than raising");
+    assert.equal(rows[0].credits, row.credits_total);
+    assert.equal(rows[0].credits, 13, "the default balance of 3, plus the 10 that were paid for");
+  });
+
+  it("a replay of that same payment still grants nothing extra", async () => {
+    // The idempotency guarantee has to survive the row having been created by
+    // the grant itself rather than by the browser.
+    const email = "no-profile@example.com";
+    const before = await creditsOf(pool, email);
+
+    const row = await grant(pool, "NO-PROFILE-ORDER", email, 10);
+    assert.equal(row.granted, false);
+    assert.equal(await creditsOf(pool, email), before);
   });
 
   // ---------------------------------------------------------------------------

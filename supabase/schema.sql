@@ -374,11 +374,32 @@ begin
   select exists (select 1 from inserted) into v_granted;
 
   if v_granted then
+    -- The profile row is created best effort from the browser, and its failure
+    -- is only logged, so it can genuinely be absent at this point. This used to
+    -- raise P0002 - which rolled the credit_purchases insert back with it. The
+    -- money was taken at PayPal, nothing was recorded, and every retry failed
+    -- in exactly the same place for ever: the ledger row is written inside this
+    -- same transaction, so nothing survived to make the next attempt behave
+    -- differently. A missing profile row is not a reason to lose a payment.
+    --
+    -- The row is created instead. p_user_email comes from the verified JWT, and
+    -- it is the same row, with the same default balance, that the browser would
+    -- have inserted; the browser's own upsert fills in the name and picture
+    -- when it next runs.
+    insert into public."Users" (email)
+    values (p_user_email)
+    on conflict (email) do nothing;
+
     update public."Users"
        set credits = credits + p_credits
      where email = p_user_email
     returning credits into v_total;
 
+    -- Unreachable now: the insert above guarantees the row, in this same
+    -- transaction. Kept because failing loudly beats crediting nothing and
+    -- reporting success, and because a retry is safe - captureOrder answers
+    -- ORDER_ALREADY_CAPTURED by reading the order back, so the next attempt
+    -- reaches here with the same facts rather than paying twice.
     if not found then
       raise exception 'no Users row for %', p_user_email using errcode = 'P0002';
     end if;
