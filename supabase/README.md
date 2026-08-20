@@ -37,6 +37,7 @@ grants:
 | `Interviews` insert | granted to `authenticated` | revoked — use `create_interview()` |
 | `interview-feedback` write | granted to `authenticated` | revoked — server only |
 | `rate_limits`, `credit_purchases` | default Supabase grants | revoked from `anon` and `authenticated` |
+| `interview_sessions`, `answer_scores` | did not exist | new; server-only, no client access |
 
 The application in this repository is written against the *after* column. An
 older deployment pointed at the *after* database will fail to create interviews,
@@ -49,6 +50,37 @@ Paste the file into the Supabase SQL editor and run it. It is idempotent:
 `create table if not exists`, `create or replace function`, `drop policy if
 exists` before each `create policy`, and the one new constraint is added inside
 a guard and marked `not valid` so historic rows cannot block the migration.
+
+## Was this ever applied to the live database?
+
+No test in this repository can answer that, and it is the question that matters
+most: the four recruiter reads run in the browser under the anon key, filtered by
+a client-supplied `.eq("userEmail", …)`. Row level security is the only thing
+stopping a devtools user deleting that filter and reading every recruiter's
+interviews and every candidate's report. If RLS is off, the filter is decoration.
+
+```bash
+DATABASE_URL="postgres://postgres:PASSWORD@db.PROJECT.supabase.co:5432/postgres" npm run verify:db
+```
+
+49 read-only checks. It writes nothing, and it exits non-zero with the specific
+failures if the live database does not enforce what this file describes.
+
+To look yourself, the two queries it is built around:
+
+```sql
+-- Every one of these must report relrowsecurity = true.
+select relname, relrowsecurity
+  from pg_class
+ where relname in ('Users','Interviews','interview-feedback','rate_limits',
+                   'credit_purchases','interview_sessions','answer_scores');
+
+-- No row here may list anon in its roles, and no SELECT policy may have
+-- qual = true.
+select schemaname, tablename, policyname, cmd, roles, qual, with_check
+  from pg_policies
+ where schemaname = 'public';
+```
 
 ## Running the database tests, free and without root
 
