@@ -449,7 +449,10 @@ describe("supabase/schema.sql", { skip }, () => {
       await client.query("select set_config('request.jwt.claims', $1, true)", [
         JSON.stringify({ email: OTHER }),
       ]);
-      await client.query("set local role postgres");
+      // Back to the connection's own (superuser) role. `reset role` rather than
+      // `set local role postgres`, because the cluster superuser is not always
+      // named "postgres" -- on one that is not, this test and the two after it fail.
+      await client.query("reset role");
       await client.query(`update public."Users" set credits = 0 where email = $1`, [OTHER]);
       await client.query("set local role authenticated");
 

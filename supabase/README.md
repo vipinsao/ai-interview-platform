@@ -1,6 +1,6 @@
 # Database
 
-`schema.sql` is the whole database: tables, indexes, the three functions, the
+`schema.sql` is the whole database: tables, indexes, the four functions, the
 table and column privileges, and the row level security policies.
 
 ## Provenance, stated honestly
