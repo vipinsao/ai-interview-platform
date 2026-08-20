@@ -597,10 +597,15 @@ inside `grant_purchased_credits` rather than raising.
 
 ### 9.3 One test asserts against a role name that is not guaranteed
 
-`tests/sql.test.js:452` uses `set local role postgres` to get back to the
-connection's own role after a `set local role authenticated`. The cluster
-superuser is not always named `postgres` — on one that is not, that line and the
-two assertions after it fail for a reason that has nothing to do with the schema
-under test. `reset role` returns to the session's own role by definition and
-needs no name. It is a one-line change, and it is the kind of thing that only
-shows up when somebody else runs your suite.
+`tests/sql.test.js` escalated back out of `set local role authenticated` with
+`set local role postgres`. The cluster superuser is not always named `postgres`
+— on one that is not, PostgreSQL raises `role "postgres" does not exist` and
+that assertion plus the two after it fail for a reason that has nothing to do
+with the schema under test. `reset role` returns to the session's own role by
+definition and needs no name.
+
+Fixed in `98d1675`; the call is now `reset role` at `tests/sql.test.js:455`.
+It is the kind of defect that only shows up when somebody else runs your
+suite, which is the same reason it showed up here: reading the RLS tests to
+describe the privilege map in §2 meant reading what each `set local role` was
+actually asserting.
