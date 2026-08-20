@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run lint
+
+      - run: npm test
+
+      # `next build` prerenders pages that import the Supabase browser client,
+      # which refuses to start without its two public variables. These are
+      # syntactically valid placeholders, not secrets: the build never makes a
+      # network call, so no real project is needed to prove the app compiles.
+      - run: npm run build
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: https://placeholder.supabase.co
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: placeholder-anon-key
+          NEXT_PUBLIC_HOST_URL: http://localhost:3000
