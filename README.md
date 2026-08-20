@@ -2,6 +2,9 @@
 
 A web app where a recruiter generates a role-specific interview with a language model, shares a link, and the candidate answers out loud in the browser — each answer scored individually and collected into a report.
 
+**You can check it without an account.** `npm install && npm test` runs 85 tests
+in under a second with no keys, no card and no network — [what they cover](#try-it-without-an-account).
+
 ## Screenshots
 
 | | |
@@ -15,7 +18,7 @@ A web app where a recruiter generates a role-specific interview with a language 
 
 Two paths need no credentials, no card and no network.
 
-**Run the tests.** 72 of them, in under a second, with no keys:
+**Run the tests.** 85 of them, in under a second, with no keys:
 
 ```bash
 git clone https://github.com/vipinsao/ai-interview-platform.git
@@ -26,8 +29,9 @@ npm test
 They cover the interview state machine, the scoring arithmetic, speech
 detection and fallback, model-reply validation, the credit-purchase
 verification path with PayPal stubbed, share-link expiry, and startup config.
-A further 19 run against a real PostgreSQL when you give them one — see
-[supabase/README.md](./supabase/README.md).
+A further 24 run against a real PostgreSQL when you give them one, for 109 in
+total — see [supabase/README.md](./supabase/README.md). CI
+(`.github/workflows/ci.yml`) runs install, lint, test and build on every push.
 
 **Tour the whole UI.** `.env.example` ships with working placeholder Supabase
 values, so this renders the entire product straight away:
@@ -41,6 +45,27 @@ those placeholders. The dev server prints a list of anything still missing and
 starts anyway; you only need real credentials when you want to actually create
 an interview. (A production server, by contrast, refuses to start — see
 [Setup](#setup).)
+
+## Where this came from
+
+I built this in May and June 2025 as a portfolio project, on a hosted voice-agent
+SDK and a Supabase schema set up through the dashboard. In August 2026 I went
+back through it. The things worth naming: **a candidate could set their own
+score**, because the report was assembled from what the browser posted rather
+than from anything the server had recorded; **a recruiter could give themselves
+credits**, because row level security decides *whose* row you may write and not
+*which columns*, so `update({ credits: 999999 })` on your own row satisfied the
+policy; **credits were granted before PayPal was asked whether the money
+arrived**; the rate limiter read, decided in JavaScript, then wrote, which let
+both of two simultaneous requests through; anonymous reads of the tables were
+open; and the landing page and reports carried pricing and rating figures that
+were invented rather than measured. The voice SDK was replaced with the
+browser's own Web Speech API, which removed a vendor and a client-side key, and
+cost Firefox support — that trade-off is argued rather than hidden, in
+[DECISIONS.md](./DECISIONS.md).
+
+What I could not verify is billing against a live PayPal sandbox, and the
+accuracy of the model's scoring. Both say so where they appear.
 
 ## How it works
 
@@ -184,7 +209,7 @@ npm run build
 To run the database tests too:
 
 ```bash
-TEST_DATABASE_URL="postgres://…" npm test    # adds 19 tests against real Postgres
+TEST_DATABASE_URL="postgres://…" npm test    # adds 24 tests against real Postgres, 109 in all
 ```
 
 [supabase/README.md](./supabase/README.md) has a copy-paste way to get a throwaway PostgreSQL for free, without Docker and without root.
