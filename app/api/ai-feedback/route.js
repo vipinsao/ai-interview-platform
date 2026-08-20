@@ -23,7 +23,7 @@ import { SUMMARY_PROMPT, fillTemplate } from "@/lib/prompts";
 import { summarySchema } from "@/lib/schemas";
 import { aggregateScores } from "@/lib/score";
 import { buildPerQuestion, describeScores } from "@/lib/report";
-import { GENERATION_LIMIT, rateLimitKey } from "@/lib/rateLimit";
+import { GENERATION_LIMIT } from "@/lib/rateLimit";
 import { isUuidV4 } from "@/lib/tokens";
 import { completeStructured } from "@/lib/server/llm";
 import { saveFeedback } from "@/lib/server/interviews";
@@ -33,6 +33,7 @@ import {
   markSessionSubmitted,
 } from "@/lib/server/sessions";
 import { jsonError } from "@/lib/server/http";
+import { resolveThenConsume } from "@/lib/server/gate";
 import {
   consumeRateLimit,
   rateLimitHeaders,
@@ -67,13 +68,19 @@ export async function POST(request) {
     return jsonError(404, "That interview session is not valid.");
   }
 
-  // Keyed on the session, so one candidate cannot exhaust another's budget.
-  let decision;
+  // Keyed on the session, so one candidate cannot exhaust another's budget —
+  // and resolved before the budget is spent, so a caller sending a fresh random
+  // UUID each time buys neither a new budget nor a permanent counter row. See
+  // lib/server/gate.js.
+  let gate;
   try {
-    decision = await consumeRateLimit(
-      rateLimitKey("ai-feedback", body.sessionToken),
-      GENERATION_LIMIT
-    );
+    gate = await resolveThenConsume({
+      resolve: () => findSessionWithInterview(body.sessionToken),
+      keyFor: (found) => found.session.session_token,
+      scope: "ai-feedback",
+      config: GENERATION_LIMIT,
+      consume: consumeRateLimit,
+    });
   } catch (error) {
     if (
       error instanceof RateLimitUnavailableError ||
@@ -85,20 +92,20 @@ export async function POST(request) {
     throw error;
   }
 
-  const headers = rateLimitHeaders(decision, GENERATION_LIMIT.limit);
-  if (!decision.allowed) {
+  if (gate.outcome === "unknown") {
+    return jsonError(404, "That interview session is not valid.");
+  }
+
+  const headers = rateLimitHeaders(gate.decision, GENERATION_LIMIT.limit);
+  if (gate.outcome === "limited") {
     return jsonError(
       429,
-      `This session has used its report budget for the hour. Try again in ${decision.retryAfterSeconds} seconds.`,
+      `This session has used its report budget for the hour. Try again in ${gate.decision.retryAfterSeconds} seconds.`,
       headers
     );
   }
 
-  const found = await findSessionWithInterview(body.sessionToken);
-  if (!found) {
-    return jsonError(404, "That interview session is not valid.", headers);
-  }
-  const { session, interview } = found;
+  const { session, interview } = gate.subject;
 
   // A resubmitted session is answered from what was already filed, without a
   // second report row and without spending another model call.

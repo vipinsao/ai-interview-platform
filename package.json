@@ -11,7 +11,8 @@
     "start": "next start",
     "lint": "eslint .",
     "test": "node --test \"tests/**/*.test.js\"",
-    "verify:db": "node scripts/verify-live-schema.mjs"
+    "verify:db": "node scripts/verify-live-schema.mjs",
+    "prune:rate-limits": "node scripts/prune-rate-limits.mjs"
   },
   "dependencies": {
     "@paypal/react-paypal-js": "^8.8.3",

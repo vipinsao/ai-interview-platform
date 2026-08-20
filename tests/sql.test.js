@@ -329,6 +329,103 @@ describe("supabase/schema.sql", { skip }, () => {
     assert.equal(rolled.window_started_at.getTime(), afterWindow.getTime());
   });
 
+  // ---------------------------------------------------------------------------
+  // Expiry. Nothing in this repository ever deleted from rate_limits: every
+  // distinct key was a permanent row, the keys derive from session tokens and
+  // interview ids, and there was no scheduler, no admin endpoint and no script.
+  // The table grew for the life of the deployment.
+  // ---------------------------------------------------------------------------
+
+  it("consume_rate_limit sweeps expired counters as it runs", async () => {
+    const now = new Date("2026-03-01T12:00:00Z");
+    const stale = new Date("2026-02-27T12:00:00Z"); // two days old
+    const recent = new Date("2026-03-01T11:00:00Z"); // an hour old
+
+    await pool.query("delete from public.rate_limits");
+    for (let i = 0; i < 40; i += 1) {
+      await pool.query(
+        "insert into public.rate_limits (key, window_start, count) values ($1, $2, 1)",
+        [`stale-${i}`, stale]
+      );
+    }
+    await pool.query(
+      "insert into public.rate_limits (key, window_start, count) values ($1, $2, 1)",
+      ["recent", recent]
+    );
+
+    const before = await pool.query("select count(*)::int as n from public.rate_limits");
+    assert.equal(before.rows[0].n, 41);
+
+    await consume(pool, "live-key", 10, 60000, now);
+
+    const after = await pool.query("select key from public.rate_limits order by key");
+    assert.deepEqual(
+      after.rows.map((row) => row.key).sort(),
+      ["live-key", "recent"],
+      "the two-day-old counters are gone; the hour-old one and the live one stay"
+    );
+  });
+
+  it("the sweep never touches the key being consumed, however old it is", async () => {
+    // A delete and an upsert racing over the same key in one statement would
+    // commit the delete and lose the count, so p_key is excluded by hand.
+    const key = "ancient-but-live";
+    const now = new Date("2026-03-01T12:00:00Z");
+
+    await pool.query("delete from public.rate_limits");
+    await pool.query(
+      "insert into public.rate_limits (key, window_start, count) values ($1, $2, 5)",
+      [key, new Date("2026-01-01T00:00:00Z")]
+    );
+
+    const decision = await consume(pool, key, 10, 60000, now);
+    assert.equal(decision.allowed, true);
+    assert.equal(decision.hit_count, 1, "an elapsed window starts again at one");
+
+    const { rows } = await pool.query("select count from public.rate_limits where key = $1", [key]);
+    assert.equal(rows.length, 1, "the counter it just wrote must still be there");
+    assert.equal(rows[0].count, 1);
+  });
+
+  it("prune_rate_limits clears an accumulated backlog and reports what it removed", async () => {
+    const now = new Date("2026-03-01T12:00:00Z");
+
+    await pool.query("delete from public.rate_limits");
+    for (let i = 0; i < 200; i += 1) {
+      await pool.query(
+        "insert into public.rate_limits (key, window_start, count) values ($1, $2, 1)",
+        [`backlog-${i}`, new Date("2026-02-01T00:00:00Z")]
+      );
+    }
+    await pool.query(
+      "insert into public.rate_limits (key, window_start, count) values ($1, $2, 1)",
+      ["fresh", now]
+    );
+
+    const { rows } = await pool.query("select public.prune_rate_limits($1) as removed", [now]);
+    assert.equal(rows[0].removed, 200, "the whole backlog goes in one call, not 50 at a time");
+
+    const left = await pool.query("select key from public.rate_limits");
+    assert.deepEqual(left.rows.map((row) => row.key), ["fresh"]);
+  });
+
+  it("only the service role may prune the rate limit table", async () => {
+    const client = await pool.connect();
+    try {
+      for (const role of ["anon", "authenticated"]) {
+        await asRole(client, role, null, async () => {
+          await assert.rejects(
+            () => client.query("select public.prune_rate_limits()"),
+            (error) => error.code === INSUFFICIENT_PRIVILEGE,
+            `${role} must not be able to clear rate limit counters`
+          );
+        });
+      }
+    } finally {
+      client.release();
+    }
+  });
+
   it("consume_rate_limit agrees with the JavaScript reference model", async () => {
     // lib/rateLimit.js states the fixed-window rule in a form a reader can
     // check. This runs both over the same sequence and fails if they drift.

@@ -14,11 +14,13 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
-import { SESSION_LIMIT, rateLimitKey } from "@/lib/rateLimit";
+import { SESSION_LIMIT } from "@/lib/rateLimit";
+import { isUuidV4 } from "@/lib/tokens";
 import { MissingConfigError } from "@/lib/server/env";
 import { jsonError } from "@/lib/server/http";
 import { findInterview } from "@/lib/server/interviews";
 import { createSession } from "@/lib/server/sessions";
+import { resolveThenConsume } from "@/lib/server/gate";
 import {
   consumeRateLimit,
   rateLimitHeaders,
@@ -40,12 +42,24 @@ export async function POST(request, { params }) {
     return jsonError(400, "Enter your name to join the interview.");
   }
 
-  let decision;
+  // The path segment was previously fed straight to the limiter unvalidated, so
+  // any string at all - not even a UUID - minted a counter row with a fresh
+  // 60-join budget. Shape first, so a hostile path never becomes a query.
+  if (!isUuidV4(interviewId)) {
+    return jsonError(404, "This interview link is not valid or has been removed.");
+  }
+
+  // Then the interview itself, before the budget is spent: an interview that
+  // does not exist gets no counter row and no budget. See lib/server/gate.js.
+  let gate;
   try {
-    decision = await consumeRateLimit(
-      rateLimitKey("interview-session", interviewId),
-      SESSION_LIMIT
-    );
+    gate = await resolveThenConsume({
+      resolve: () => findInterview(interviewId),
+      keyFor: (interview) => interview.interview_id,
+      scope: "interview-session",
+      config: SESSION_LIMIT,
+      consume: consumeRateLimit,
+    });
   } catch (error) {
     if (
       error instanceof RateLimitUnavailableError ||
@@ -57,20 +71,21 @@ export async function POST(request, { params }) {
     throw error;
   }
 
-  const headers = rateLimitHeaders(decision, SESSION_LIMIT.limit);
-  if (!decision.allowed) {
+  if (gate.outcome === "unknown") {
+    return jsonError(404, "This interview link is not valid or has been removed.");
+  }
+
+  const headers = rateLimitHeaders(gate.decision, SESSION_LIMIT.limit);
+  if (gate.outcome === "limited") {
     return jsonError(
       429,
-      `This interview has taken too many new joins this hour. Try again in ${decision.retryAfterSeconds} seconds.`,
+      `This interview has taken too many new joins this hour. Try again in ${gate.decision.retryAfterSeconds} seconds.`,
       headers
     );
   }
 
   try {
-    const interview = await findInterview(interviewId);
-    if (!interview) {
-      return jsonError(404, "This interview link is not valid or has been removed.", headers);
-    }
+    const interview = gate.subject;
 
     const session = await createSession({
       interviewId,

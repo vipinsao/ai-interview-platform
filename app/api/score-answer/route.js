@@ -21,12 +21,13 @@ import { z } from "zod";
 
 import { ANSWER_SCORE_PROMPT, fillTemplate } from "@/lib/prompts";
 import { answerScoreSchema } from "@/lib/schemas";
-import { SCORING_LIMIT, rateLimitKey } from "@/lib/rateLimit";
+import { SCORING_LIMIT } from "@/lib/rateLimit";
 import { isUuidV4 } from "@/lib/tokens";
 import { completeStructured, StructuredOutputError } from "@/lib/server/llm";
 import { MissingConfigError } from "@/lib/server/env";
 import { jsonError } from "@/lib/server/http";
 import { findSessionWithInterview, recordAnswerScore } from "@/lib/server/sessions";
+import { resolveThenConsume } from "@/lib/server/gate";
 import {
   consumeRateLimit,
   rateLimitHeaders,
@@ -56,14 +57,20 @@ export async function POST(request) {
     return jsonError(404, "That interview session is not valid.");
   }
 
-  // The limit is consumed before the session is looked up, so an unknown token
-  // cannot be used to make unmetered database reads.
-  let decision;
+  // The session is resolved BEFORE the budget is spent. The limiter keys on the
+  // caller's own token, so consuming first meant a freshly generated UUID
+  // bought a new 120-request budget and left a permanent rate_limits row every
+  // time — the limiter never engaged against a caller who varied the key. See
+  // lib/server/gate.js.
+  let gate;
   try {
-    decision = await consumeRateLimit(
-      rateLimitKey("score-answer", body.sessionToken),
-      SCORING_LIMIT
-    );
+    gate = await resolveThenConsume({
+      resolve: () => findSessionWithInterview(body.sessionToken),
+      keyFor: (found) => found.session.session_token,
+      scope: "score-answer",
+      config: SCORING_LIMIT,
+      consume: consumeRateLimit,
+    });
   } catch (error) {
     if (
       error instanceof RateLimitUnavailableError ||
@@ -75,21 +82,20 @@ export async function POST(request) {
     throw error;
   }
 
-  const headers = rateLimitHeaders(decision, SCORING_LIMIT.limit);
-  if (!decision.allowed) {
+  if (gate.outcome === "unknown") {
+    return jsonError(404, "That interview session is not valid.");
+  }
+
+  const headers = rateLimitHeaders(gate.decision, SCORING_LIMIT.limit);
+  if (gate.outcome === "limited") {
     return jsonError(
       429,
-      `This session has used its scoring budget for the hour. Try again in ${decision.retryAfterSeconds} seconds.`,
+      `This session has used its scoring budget for the hour. Try again in ${gate.decision.retryAfterSeconds} seconds.`,
       headers
     );
   }
 
-  const found = await findSessionWithInterview(body.sessionToken);
-  if (!found) {
-    return jsonError(404, "That interview session is not valid.", headers);
-  }
-
-  const { session, interview } = found;
+  const { session, interview } = gate.subject;
   const questions = Array.isArray(interview.questionList) ? interview.questionList : [];
   const asked = questions[body.questionIndex];
   if (!asked) {

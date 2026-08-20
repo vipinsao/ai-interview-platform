@@ -71,6 +71,16 @@ create table if not exists public.rate_limits (
   count         integer not null default 0
 );
 
+-- Nothing in this repository ever deleted from rate_limits. Every distinct key
+-- was a permanent row, and the keys are derived from session tokens and
+-- interview ids, so the table grew for the life of the deployment with no
+-- upper bound and no way to reclaim it short of a manual TRUNCATE.
+--
+-- consume_rate_limit now drains it as it runs (see below); this index is what
+-- makes that drain cheap.
+create index if not exists rate_limits_window_start_idx
+  on public.rate_limits (window_start);
+
 -- One row per PayPal order that has granted credits. The primary key is the
 -- PayPal order id, which is what makes granting idempotent: a replayed capture
 -- request loses the insert race and grants nothing. This is the record of the
@@ -168,6 +178,25 @@ create unique index if not exists interview_feedback_share_token_idx
 -- keep counting, and the cap keeps the value bounded under a sustained flood.
 -- Because a denial always stores limit + 1 and the last admitted request
 -- stores limit, "allowed" is decidable from the returned row alone.
+--
+-- The `expired` CTE is the table's only delete path. A counter whose window
+-- closed p_retain_ms ago can tell nobody anything, and the table had no expiry
+-- at all: it grew by one permanent row per distinct key for ever. Draining it
+-- from the traffic that fills it needs no scheduler, which matters because
+-- this deployment has none. The work per call is bounded to 50 rows,
+-- index-assisted by rate_limits_window_start_idx, and
+-- `skip locked` means two concurrent callers never queue behind each other for
+-- the same doomed row.
+--
+-- p_key is excluded from the sweep on purpose. Data-modifying CTEs in one
+-- statement do not see each other's effects, so a delete and an upsert racing
+-- over the same key would commit the delete and lose the count.
+--
+-- The retention and the batch size are literals rather than parameters because
+-- adding a parameter to this signature would not replace the function - it
+-- would create a second overload beside it and leave the grants below pointing
+-- at the old one. prune_rate_limits() takes both as arguments for the cases
+-- that need them.
 create or replace function public.consume_rate_limit(
   p_key       text,
   p_limit     integer,
@@ -182,7 +211,21 @@ returns table (
 )
 language sql
 as $$
-  with upserted as (
+  with expired as (
+    delete from public.rate_limits
+     where key in (
+       select key
+         from public.rate_limits
+        where key <> p_key
+          -- 24 hours, comfortably beyond the longest window any caller uses.
+          and window_start < p_now - interval '24 hours'
+        order by window_start
+        limit 50
+        for update skip locked
+     )
+    returning 1
+  ),
+  upserted as (
     insert into public.rate_limits as rl (key, window_start, count)
     values (p_key, p_now, 1)
     on conflict (key) do update
@@ -204,6 +247,30 @@ as $$
     upserted.new_window_start,
     upserted.new_window_start + make_interval(secs => p_window_ms / 1000.0)
   from upserted;
+$$;
+
+-- The same sweep, unbounded and callable on demand.
+--
+-- consume_rate_limit keeps the table flat under traffic; this is for the
+-- backlog a deployment that ran without expiry has already accumulated, and
+-- for anyone who would rather schedule the cleanup than let request traffic do
+-- it. Returns the number of counters removed.
+--
+--   select public.prune_rate_limits();                    -- older than 24h
+--   select public.prune_rate_limits(now(), 3600000);      -- older than 1h
+create or replace function public.prune_rate_limits(
+  p_now       timestamptz default now(),
+  p_retain_ms bigint default 86400000
+)
+returns integer
+language sql
+as $$
+  with expired as (
+    delete from public.rate_limits
+     where window_start < p_now - make_interval(secs => p_retain_ms / 1000.0)
+    returning 1
+  )
+  select coalesce(count(*), 0)::integer from expired;
 $$;
 
 -- Spend one credit and create the interview, or do neither.
@@ -463,6 +530,11 @@ revoke all on public.answer_scores      from anon, authenticated;
 revoke all on function public.consume_rate_limit(text, integer, bigint, timestamptz)
   from public, anon, authenticated;
 grant execute on function public.consume_rate_limit(text, integer, bigint, timestamptz)
+  to service_role;
+
+revoke all on function public.prune_rate_limits(timestamptz, bigint)
+  from public, anon, authenticated;
+grant execute on function public.prune_rate_limits(timestamptz, bigint)
   to service_role;
 
 revoke all on function public.create_interview(text, text, text, text, jsonb, uuid)
