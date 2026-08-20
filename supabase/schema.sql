@@ -1,15 +1,18 @@
 -- =============================================================================
--- AI Interview Platform — database schema and row level security policies.
+-- AI Interview Platform — database schema, functions, privileges and row level
+-- security policies.
 --
 -- HONEST NOTE ON PROVENANCE: the table and column names below are the ones the
--- application actually queries (services/*, app/**, lib/server/*). The tables
--- were originally created through the Supabase dashboard, so this file is a
+-- application actually queries (services/*, app/**, lib/server/*). The original
+-- tables were created through the Supabase dashboard, so this file is a
 -- reconstruction rather than the original migration. Diff it against your own
--- project before trusting it, and treat it as the starting point for a fresh
--- project rather than as a record of an existing one.
+-- project before running it, and read supabase/README.md first — applying it
+-- revokes privileges your project currently grants.
+--
+-- Everything in this file has been executed against PostgreSQL 18 by
+-- tests/sql.test.js. See supabase/README.md for how to run that suite.
 --
 -- Identifiers are quoted because the application uses mixed case names.
--- Run this in the Supabase SQL editor.
 -- =============================================================================
 
 -- -----------------------------------------------------------------------------
@@ -22,6 +25,9 @@ create table if not exists public."Users" (
   name        text,
   email       text not null unique,
   picture     text,
+  -- Balance of interview credits. Never written by a browser: see the
+  -- privilege section at the foot of this file. It moves only through
+  -- create_interview() (spend) and grant_purchased_credits() (top up).
   credits     integer not null default 3
 );
 
@@ -31,7 +37,7 @@ create table if not exists public."Interviews" (
   "jobPosition"   text not null,
   "jobDescription" text not null,
   duration        text not null,
-  -- Written by the client as a JSON-encoded array of interview types, e.g.
+  -- Written as a JSON-encoded array of interview types, e.g.
   -- '["Technical","Behavioral"]'. Parsed defensively in InterviewDetailContainer.
   type            text,
   "questionList"  jsonb not null default '[]'::jsonb,
@@ -52,6 +58,12 @@ create table if not exists public."interview-feedback" (
   recommended   boolean not null default false
 );
 
+-- Shareable read-only report links. Null until a recruiter mints one.
+alter table public."interview-feedback"
+  add column if not exists share_token uuid;
+alter table public."interview-feedback"
+  add column if not exists share_expires_at timestamptz;
+
 -- Fixed-window rate limit counters. Only the service role touches this table.
 create table if not exists public.rate_limits (
   key           text primary key,
@@ -59,10 +71,296 @@ create table if not exists public.rate_limits (
   count         integer not null default 0
 );
 
+-- One row per PayPal order that has granted credits. The primary key is the
+-- PayPal order id, which is what makes granting idempotent: a replayed capture
+-- request loses the insert race and grants nothing. This is the record of the
+-- payment, so it is never deleted.
+create table if not exists public.credit_purchases (
+  paypal_order_id   text primary key,
+  user_email        text not null,
+  credits_granted   integer not null check (credits_granted > 0),
+  amount_value      numeric(12,2) not null check (amount_value > 0),
+  currency          text not null,
+  paypal_capture_id text,
+  created_at        timestamptz not null default now()
+);
+
+-- -----------------------------------------------------------------------------
+-- Indexes
+-- -----------------------------------------------------------------------------
+
 create index if not exists interviews_user_email_idx
   on public."Interviews" ("userEmail");
 create index if not exists interview_feedback_interview_id_idx
   on public."interview-feedback" (interview_id);
+create index if not exists credit_purchases_user_email_idx
+  on public.credit_purchases (user_email);
+
+-- Partial and unique: a share token resolves to at most one report, and rows
+-- that were never shared do not compete for the index.
+create unique index if not exists interview_feedback_share_token_idx
+  on public."interview-feedback" (share_token)
+  where share_token is not null;
+
+-- -----------------------------------------------------------------------------
+-- Functions
+--
+-- Three things must happen atomically or not at all, so they happen in
+-- Postgres rather than in JavaScript. Each function below is one statement, or
+-- a transaction the caller cannot interleave with anything else.
+-- -----------------------------------------------------------------------------
+
+-- Fixed-window rate limiting, decided and recorded in a single statement.
+--
+-- The previous implementation read the counter, decided in JavaScript, then
+-- wrote it back. Two requests arriving together both read the same count and
+-- both were admitted. INSERT ... ON CONFLICT DO UPDATE takes a row lock, so
+-- concurrent callers are serialised by the database and the count is exact.
+--
+-- The stored count is capped at limit + 1: a denied request does not need to
+-- keep counting, and the cap keeps the value bounded under a sustained flood.
+-- Because a denial always stores limit + 1 and the last admitted request
+-- stores limit, "allowed" is decidable from the returned row alone.
+create or replace function public.consume_rate_limit(
+  p_key       text,
+  p_limit     integer,
+  p_window_ms bigint,
+  p_now       timestamptz default now()
+)
+returns table (
+  allowed           boolean,
+  hit_count         integer,
+  window_started_at timestamptz,
+  reset_at          timestamptz
+)
+language sql
+as $$
+  with upserted as (
+    insert into public.rate_limits as rl (key, window_start, count)
+    values (p_key, p_now, 1)
+    on conflict (key) do update
+      set window_start = case
+            when p_now - rl.window_start >= make_interval(secs => p_window_ms / 1000.0)
+              then p_now
+            else rl.window_start
+          end,
+          count = case
+            when p_now - rl.window_start >= make_interval(secs => p_window_ms / 1000.0)
+              then 1
+            else least(rl.count + 1, p_limit + 1)
+          end
+    returning rl.count as new_count, rl.window_start as new_window_start
+  )
+  select
+    upserted.new_count <= p_limit,
+    upserted.new_count,
+    upserted.new_window_start,
+    upserted.new_window_start + make_interval(secs => p_window_ms / 1000.0)
+  from upserted;
+$$;
+
+-- Spend one credit and create the interview, or do neither.
+--
+-- Creating an interview used to be a client-side INSERT followed by a
+-- client-side "credits - 1" UPDATE whose failure was logged and ignored. A
+-- recruiter could skip the second call and create interviews for ever, and a
+-- failed INSERT still charged a credit. Both statements now run inside one
+-- function call, which is one transaction.
+--
+-- The owner is taken from the verified JWT, not from an argument, so a caller
+-- cannot create an interview in someone else's name.
+create or replace function public.create_interview(
+  p_job_position    text,
+  p_job_description text,
+  p_duration        text,
+  p_type            text,
+  p_question_list   jsonb,
+  p_interview_id    uuid
+)
+returns uuid
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  v_email     text := auth.jwt() ->> 'email';
+  v_remaining integer;
+begin
+  if v_email is null or v_email = '' then
+    raise exception 'not authenticated' using errcode = '28000';
+  end if;
+
+  -- The guard is in the WHERE clause, so two concurrent calls cannot both see
+  -- the last credit: the second one matches no row.
+  update public."Users"
+     set credits = credits - 1
+   where email = v_email
+     and credits > 0
+  returning credits into v_remaining;
+
+  if not found then
+    raise exception 'no interview credits remaining'
+      using errcode = 'P0001', hint = 'Buy more credits on the billing page.';
+  end if;
+
+  insert into public."Interviews" (
+    "jobPosition", "jobDescription", duration, type, "questionList",
+    "userEmail", interview_id
+  ) values (
+    p_job_position, p_job_description, p_duration, p_type,
+    coalesce(p_question_list, '[]'::jsonb), v_email, p_interview_id
+  );
+
+  return p_interview_id;
+end;
+$$;
+
+-- Grant the credits bought by one PayPal order, exactly once.
+--
+-- The ledger insert comes first and carries the primary key. If the order id
+-- has already been recorded the insert does nothing, the balance is left
+-- alone, and the function reports granted = false. A replayed request
+-- therefore cannot add credits twice, and the guarantee is a unique index
+-- rather than an application-level check that a race could straddle.
+--
+-- Called only by the server, after it has verified the order with PayPal.
+create or replace function public.grant_purchased_credits(
+  p_order_id   text,
+  p_user_email text,
+  p_credits    integer,
+  p_amount     numeric,
+  p_currency   text,
+  p_capture_id text
+)
+returns table (granted boolean, credits_total integer)
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  v_granted boolean;
+  v_total   integer;
+begin
+  if p_credits is null or p_credits <= 0 then
+    raise exception 'credits must be a positive integer' using errcode = '22023';
+  end if;
+
+  with inserted as (
+    insert into public.credit_purchases (
+      paypal_order_id, user_email, credits_granted,
+      amount_value, currency, paypal_capture_id
+    )
+    values (
+      p_order_id, p_user_email, p_credits,
+      p_amount, p_currency, p_capture_id
+    )
+    on conflict (paypal_order_id) do nothing
+    returning 1
+  )
+  select exists (select 1 from inserted) into v_granted;
+
+  if v_granted then
+    update public."Users"
+       set credits = credits + p_credits
+     where email = p_user_email
+    returning credits into v_total;
+
+    if not found then
+      raise exception 'no Users row for %', p_user_email using errcode = 'P0002';
+    end if;
+  else
+    select u.credits into v_total
+      from public."Users" u
+     where u.email = p_user_email;
+  end if;
+
+  return query select v_granted, v_total;
+end;
+$$;
+
+-- -----------------------------------------------------------------------------
+-- Constraints added separately, so the file is safe to run against a project
+-- whose tables already exist. NOT VALID enforces the rule on every future
+-- write without failing the migration on historic rows.
+-- -----------------------------------------------------------------------------
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint where conname = 'users_credits_non_negative'
+  ) then
+    alter table public."Users"
+      add constraint users_credits_non_negative check (credits >= 0) not valid;
+  end if;
+end;
+$$;
+
+-- -----------------------------------------------------------------------------
+-- Table privileges
+--
+-- Row level security decides WHICH ROWS a role may touch. It cannot say which
+-- COLUMNS, and that distinction is the whole of the credit vulnerability: the
+-- "users update own profile" policy below is satisfied by
+--
+--     supabase.from("Users").update({ credits: 999999 }).eq("email", myEmail)
+--
+-- because the row genuinely is the caller's own. Any signed-in user could
+-- award themselves unlimited credits from the browser console, with no payment
+-- involved at all. The fix is a column-level grant, applied here.
+--
+-- Note that REVOKE on a column does NOT override a table-wide privilege, so
+-- each table-level grant is revoked first and then re-granted per column.
+-- -----------------------------------------------------------------------------
+
+-- Users: readable by the owner, but only name and picture are writable.
+-- credits is absent from both grants, so no browser can write it by any route.
+revoke all on public."Users" from anon, authenticated;
+grant select                     on public."Users" to authenticated;
+grant insert ("name", email, picture) on public."Users" to authenticated;
+grant update ("name", picture)        on public."Users" to authenticated;
+
+-- Interviews: readable and removable by the owning recruiter. INSERT is not
+-- granted because creating an interview must spend a credit, which only
+-- create_interview() does atomically.
+revoke all on public."Interviews" from anon, authenticated;
+grant select, update, delete on public."Interviews" to authenticated;
+
+-- interview-feedback: reports are written by the server (the candidate has no
+-- account) and read by the owning recruiter. Nothing client-side may write,
+-- which also keeps share_token out of reach.
+revoke all on public."interview-feedback" from anon, authenticated;
+grant select on public."interview-feedback" to authenticated;
+
+-- rate_limits and credit_purchases: server only. A user must not be able to
+-- clear their own rate limit counter or forge a payment record.
+revoke all on public.rate_limits      from anon, authenticated;
+revoke all on public.credit_purchases from anon, authenticated;
+
+-- -----------------------------------------------------------------------------
+-- Function privileges
+--
+-- Postgres grants EXECUTE on new functions to PUBLIC, and Supabase's default
+-- privileges additionally grant it to anon and authenticated. A revoke from
+-- PUBLIC does not remove those explicit grants, so anon and authenticated are
+-- named as well. Without this, grant_purchased_credits — which adds credits to
+-- a balance — is callable straight from the browser with the anon key.
+-- (tests/sql.test.js "only the service role may grant credits" covers it.)
+-- -----------------------------------------------------------------------------
+
+revoke all on function public.consume_rate_limit(text, integer, bigint, timestamptz)
+  from public, anon, authenticated;
+grant execute on function public.consume_rate_limit(text, integer, bigint, timestamptz)
+  to service_role;
+
+revoke all on function public.create_interview(text, text, text, text, jsonb, uuid)
+  from public, anon;
+grant execute on function public.create_interview(text, text, text, text, jsonb, uuid)
+  to authenticated;
+
+revoke all on function public.grant_purchased_credits(text, text, integer, numeric, text, text)
+  from public, anon, authenticated;
+grant execute on function public.grant_purchased_credits(text, text, integer, numeric, text, text)
+  to service_role;
 
 -- -----------------------------------------------------------------------------
 -- Row level security
@@ -73,17 +371,19 @@ create index if not exists interview_feedback_interview_id_idx
 -- query forgets its filter.
 --
 -- The service role key bypasses RLS, which is why the candidate-facing routes
--- (app/api/interview/[interview_id], app/api/ai-feedback) run server-side —
--- an anonymous candidate is given exactly the one interview their link names
--- and never a key that can read the table.
+-- (app/api/interview/[interview_id], app/api/ai-feedback, app/api/report) run
+-- server-side — an anonymous candidate is given exactly the one row their link
+-- names and never a key that can read the table.
 -- -----------------------------------------------------------------------------
 
 alter table public."Users"              enable row level security;
 alter table public."Interviews"         enable row level security;
 alter table public."interview-feedback" enable row level security;
 alter table public.rate_limits          enable row level security;
+alter table public.credit_purchases     enable row level security;
 
--- Users: a signed-in user may only see and edit their own profile row.
+-- Users: a signed-in user may only see and edit their own profile row. The
+-- column grants above decide what "edit" can reach.
 drop policy if exists "users read own profile" on public."Users";
 create policy "users read own profile" on public."Users"
   for select to authenticated
@@ -102,6 +402,8 @@ create policy "users update own profile" on public."Users"
 
 -- Interviews: owned by the recruiter who created them. There is deliberately
 -- no policy for the anon role, so an anonymous client cannot list interviews.
+-- The insert policy is kept as a second line of defence: if a future migration
+-- re-grants INSERT on the table, the row still has to name its own owner.
 drop policy if exists "recruiters read own interviews" on public."Interviews";
 create policy "recruiters read own interviews" on public."Interviews"
   for select to authenticated
@@ -138,6 +440,5 @@ create policy "recruiters read feedback for own interviews" on public."interview
     )
   );
 
--- rate_limits: RLS is enabled with no policies, so anon and authenticated
--- clients have no access at all. A user must not be able to clear their own
--- counter, which is exactly why the server writes it with the service role key.
+-- rate_limits and credit_purchases: RLS is enabled with no policies at all, so
+-- anon and authenticated have no access by any route, privileges aside.
