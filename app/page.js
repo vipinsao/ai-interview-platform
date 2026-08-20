@@ -44,8 +44,19 @@ export default function LandingPage() {
     }
   };
 
+  // Escape has to close the contact dialog: it is the only keyboard exit, and
+  // the close button is the last thing a keyboard user reaches.
+  useEffect(() => {
+    if (!showContactModal) return;
+    const onKeyDown = (e) => {
+      if (e.key === "Escape") setShowContactModal(false);
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [showContactModal]);
+
   return (
-    <div className="min-h-screen bg-gradient-to-b from-[#f9fbff] to-[#f0f4ff] text-gray-900 select-none">
+    <div className="min-h-screen bg-gradient-to-b from-[#f9fbff] to-[#f0f4ff] text-gray-900">
       <Toaster position="top-center" />
 
       {/* Header */}
@@ -67,13 +78,10 @@ export default function LandingPage() {
           <a href="#whatsnew" className="hover:text-blue-600">
             What&apos;s New
           </a>
-          <a href="#pricing" className="hover:text-blue-600">
-            Pricing
-          </a>
         </nav>
         <div className="flex gap-2">
           <Button
-            className="bg-green-400 text-white hover:bg-green-700 cursor-pointer"
+            className="bg-green-700 text-white hover:bg-green-800 cursor-pointer"
             onClick={handleSignInClick}
           >
             {hasSession ? "Go to Dashboard" : "Sign In"}
@@ -184,56 +192,6 @@ export default function LandingPage() {
         </div>
       </section>
 
-      {/* Pricing Section */}
-      <section id="pricing" className="bg-white py-16 px-6 md:px-20">
-        <h2 className="text-3xl font-bold text-center text-blue-600 mb-10">
-          Pricing Plans
-        </h2>
-        <div className="grid md:grid-cols-3 gap-8">
-          <div className="p-6 border rounded-lg shadow hover:shadow-md transition">
-            <h3 className="text-xl font-semibold mb-2">Free</h3>
-            <p className="text-gray-600 mb-4">Ideal for beginners</p>
-            <ul className="text-gray-600 space-y-2 mb-4">
-              <li>✔️ 5 mock interviews/month</li>
-              <li>✔️ Basic feedback</li>
-              <li>❌ No real-time support</li>
-            </ul>
-            <Button className="bg-blue-600 text-white w-full hover:bg-blue-700 cursor-pointer">
-              Get Started
-            </Button>
-          </div>
-          <div className="p-6 border-2 border-blue-600 rounded-lg shadow-lg bg-blue-50">
-            <div className="flex flex-row justify-between">
-              <h3 className="text-xl font-semibold mb-2">Pro</h3>
-              <h3 className="text-[14px] font-semibold mb-2 text-white bg-blue-800 p-2 rounded-md">
-                Recommonded
-              </h3>
-            </div>
-            <p className="text-gray-600 mb-4">Best for job seekers</p>
-            <ul className="text-gray-600 space-y-2 mb-4">
-              <li>✔️ Unlimited interviews</li>
-              <li>✔️ AI voice assistant</li>
-              <li>✔️ Analytics & feedback</li>
-            </ul>
-            <Button className="bg-blue-600 text-white w-full hover:bg-blue-700 cursor-pointer">
-              Upgrade Now
-            </Button>
-          </div>
-          <div className="p-6 border rounded-lg shadow hover:shadow-md transition">
-            <h3 className="text-xl font-semibold mb-2">Enterprise</h3>
-            <p className="text-gray-600 mb-4">For HR teams</p>
-            <ul className="text-gray-600 space-y-2 mb-4">
-              <li>✔️ Team dashboard</li>
-              <li>✔️ API access</li>
-              <li>✔️ Dedicated support</li>
-            </ul>
-            <Button className="bg-blue-600 text-white w-full hover:bg-blue-700 cursor-pointer">
-              Contact Sales
-            </Button>
-          </div>
-        </div>
-      </section>
-
       {/* Footer */}
       <footer className="bg-gray-900 text-white py-10 px-6 md:px-20 mt-10">
         <div className="flex flex-col md:flex-row justify-between items-center gap-6">
@@ -250,26 +208,43 @@ export default function LandingPage() {
             <a href="#" className="text-gray-400 hover:text-white">
               Terms of Service
             </a>
-            <a
-              href="#"
-              className="text-gray-400 hover:text-white"
+            <button
+              type="button"
+              className="text-gray-400 hover:text-white cursor-pointer"
               onClick={() => setShowContactModal(true)}
             >
               Contact
-            </a>
+            </button>
           </div>
         </div>
       </footer>
       {showContactModal && (
-        <div className="fixed inset-0 z-50 bg-black bg-opacity-50 flex items-center justify-center">
-          <div className="bg-white p-6 rounded-lg w-[90%] max-w-md shadow-lg relative">
+        // bg-black/50 rather than bg-opacity-50: Tailwind v4 dropped the
+        // bg-opacity-* utilities, so the old class emitted no CSS and the
+        // backdrop covered the page fully opaque.
+        <div
+          className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center"
+          onClick={() => setShowContactModal(false)}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="contact-modal-title"
+            className="bg-white p-6 rounded-lg w-[90%] max-w-md shadow-lg relative"
+            onClick={(e) => e.stopPropagation()}
+          >
             <button
+              type="button"
+              aria-label="Close"
               onClick={() => setShowContactModal(false)}
               className="absolute top-2 right-2 text-gray-500 hover:text-red-500 cursor-pointer"
             >
               ✕
             </button>
-            <h2 className="text-xl font-semibold mb-4 text-center text-gray-800">
+            <h2
+              id="contact-modal-title"
+              className="text-xl font-semibold mb-4 text-center text-gray-800"
+            >
               Contact Info
             </h2>
             <div className="space-y-4">
