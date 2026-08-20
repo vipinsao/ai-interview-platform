@@ -64,6 +64,13 @@ function Interview() {
     router.push("/interview/" + interview_id + "/start");
   };
 
+  // Submitting the form is the same action as pressing the button, so Enter in
+  // either text field joins the interview instead of doing nothing.
+  const onSubmit = (e) => {
+    e.preventDefault();
+    onJoinInterview();
+  };
+
   return (
     <div className="min-h-screen flex items-center justify-center bg-gray-100 mt-4 w-full">
       <div className="bg-white rounded-lg shadow-md p-8 w-full max-w-lg flex flex-col items-center">
@@ -99,68 +106,80 @@ function Interview() {
         </div>
 
         {/* Input Section */}
-        <div className="w-full">
-          <label
-            className="block font-semibold text-gray-600 text-sm mb-1"
-            htmlFor="name"
-          >
-            Enter Your Full Name
-          </label>
-          <Input
-            id="name"
-            placeholder="e.g. John Smith"
-            className="w-full"
-            onChange={(e) => setUserName(e.target.value)}
-          />
-        </div>
-        <div className="w-full">
-          <label
-            className="block mt-2 font-semibold text-gray-600 text-sm mb-1"
-            htmlFor="name"
-          >
-            Enter Your Email
-          </label>
-          <Input
-            id="name"
-            placeholder="e.g. Alex@gmail.com"
-            className="w-full"
-            onChange={(e) => setUserEmail(e.target.value)}
-          />
-        </div>
-        <div className="p-3 bg-blue-100 flex gap-4 rounded-lg mt-2 flex-col">
-          <div className="flex items-center gap-2">
-            <Info className="w-4 h-4 mt-1 text-primary" />
-            <h2 className="font-bold">Before you begin</h2>
+        {/* Both fields used to carry id="name", so the email label focused the
+            name box and the email input had no accessible name at all. */}
+        <form className="w-full flex flex-col items-center" onSubmit={onSubmit}>
+          <div className="w-full">
+            <label
+              className="block font-semibold text-gray-600 text-sm mb-1"
+              htmlFor="candidate-name"
+            >
+              Enter Your Full Name
+            </label>
+            <Input
+              id="candidate-name"
+              name="name"
+              autoComplete="name"
+              placeholder="e.g. John Smith"
+              className="w-full"
+              onChange={(e) => setUserName(e.target.value)}
+            />
           </div>
-          <ul>
-            <li className="text-sm text-primary">
-              - Test your camera and microphone
-            </li>
-            <li className="text-sm text-primary">
-              - Ensure you have a stable internet connection
-            </li>
-            <li className="text-sm text-primary">
-              - Find a Quiet place for interview
-            </li>
-          </ul>
-        </div>
-        {linkError && (
-          <p className="mt-4 w-full text-sm text-red-700 bg-red-50 border border-red-200 rounded-md p-3">
-            {linkError}
-          </p>
-        )}
-        <Button
-          className={"mt-5 w-full font-bold flex items-center"}
-          disabled={loading || joining || Boolean(linkError) || !userName.trim()}
-          onClick={() => onJoinInterview()}
-        >
-          {joining ? (
-            <Loader2Icon className="animate-spin" />
-          ) : (
-            <Video />
-          )}{" "}
-          {loading ? "Loading interview…" : "Join Interview"}
-        </Button>
+          <div className="w-full">
+            <label
+              className="block mt-2 font-semibold text-gray-600 text-sm mb-1"
+              htmlFor="candidate-email"
+            >
+              Enter Your Email
+            </label>
+            <Input
+              id="candidate-email"
+              name="email"
+              type="email"
+              inputMode="email"
+              autoComplete="email"
+              placeholder="e.g. Alex@gmail.com"
+              className="w-full"
+              onChange={(e) => setUserEmail(e.target.value)}
+            />
+          </div>
+          <div className="p-3 bg-blue-100 flex gap-4 rounded-lg mt-2 flex-col">
+            <div className="flex items-center gap-2">
+              <Info className="w-4 h-4 mt-1 text-primary" />
+              <h2 className="font-bold">Before you begin</h2>
+            </div>
+            <ul>
+              <li className="text-sm text-primary">
+                - Test your camera and microphone
+              </li>
+              <li className="text-sm text-primary">
+                - Ensure you have a stable internet connection
+              </li>
+              <li className="text-sm text-primary">
+                - Find a Quiet place for interview
+              </li>
+            </ul>
+          </div>
+          {linkError && (
+            <p className="mt-4 w-full text-sm text-red-700 bg-red-50 border border-red-200 rounded-md p-3">
+              {linkError}
+            </p>
+          )}
+          <Button
+            type="submit"
+            className={"mt-5 w-full font-bold flex items-center"}
+            disabled={
+              loading || joining || Boolean(linkError) || !userName.trim()
+            }
+          >
+            {joining ? (
+              <Loader2Icon className="animate-spin" />
+            ) : (
+              <Video />
+            )}{" "}
+            {loading ? "Loading interview…" : "Join Interview"}
+          </Button>
+        </form>
       </div>
     </div>
   );
