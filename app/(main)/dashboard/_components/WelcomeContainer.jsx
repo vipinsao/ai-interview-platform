@@ -15,13 +15,16 @@ function WelcomeContainer() {
   const { user, setUser } = useUser();
   const router = useRouter();
 
+  // The inner function here was defined and never called, so "Logout" only
+  // navigated away: the Supabase session survived and the next visit went
+  // straight back into the dashboard as the same user.
   const handleLogout = async () => {
-    const logout = async () => {
-      await supabase.auth.signOut();
-      setUser(null); // clear state
-    };
-
-    router.push("/auth"); // redirect after logout
+    const { error } = await supabase.auth.signOut();
+    if (error) {
+      console.error("Sign out failed:", error.message);
+    }
+    setUser(null);
+    router.push("/auth");
   };
 
   return (

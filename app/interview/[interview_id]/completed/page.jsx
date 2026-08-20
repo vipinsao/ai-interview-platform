@@ -38,7 +38,7 @@ function page() {
             height={100}
             className="w-[50px] h-[50px]"
           />
-          <h2 className="font-semibold text-xl">What's Next?</h2>
+          <h2 className="font-semibold text-xl">What&apos;s Next?</h2>
         </div>
         <p className="text-center text-gray-400">
           The Recruiter will review your interview response and will contact you

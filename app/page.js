@@ -65,7 +65,7 @@ export default function LandingPage() {
             Features
           </a>
           <a href="#whatsnew" className="hover:text-blue-600">
-            What's New
+            What&apos;s New
           </a>
           <a href="#pricing" className="hover:text-blue-600">
             Pricing
@@ -113,10 +113,13 @@ export default function LandingPage() {
           </div>
         </div>
         <div className="flex justify-center">
-          <img
+          <Image
             src="/dashboard.png"
             alt="Dashboard Preview"
-            className="rounded-xl shadow-lg max-w-full"
+            width={1200}
+            height={800}
+            priority
+            className="rounded-xl shadow-lg max-w-full h-auto"
           />
         </div>
       </main>
@@ -159,7 +162,7 @@ export default function LandingPage() {
         className="bg-gradient-to-br from-blue-50 to-blue-100 py-16 px-6 md:px-20"
       >
         <h2 className="text-3xl font-bold text-center text-blue-600 mb-10">
-          What's New
+          What&apos;s New
         </h2>
         <div className="grid md:grid-cols-2 gap-8">
           <div className="bg-white p-6 rounded-lg shadow hover:shadow-md transition">

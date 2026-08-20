@@ -1,8 +1,7 @@
 "use client";
 import { useUser } from "@/app/provider";
-import { supabase } from "@/services/supabaseClient";
 import { CreditCard, PlusCircle } from "lucide-react";
-import React, { useEffect, useState } from "react";
+import React from "react";
 import PayButton from "./_components/PayButton";
 
 const plans = [
@@ -32,11 +31,9 @@ const plans = [
 
 function Billing() {
   const user = useUser();
-  let creditsLeft;
-  creditsLeft = user?.user?.credits;
-  useEffect(() => {
-    creditsLeft = user?.user?.credits;
-  }, [user?.user?.credits]);
+  // This was previously reassigned inside a useEffect, where the new value was
+  // discarded on every render. It is just a derived value.
+  const creditsLeft = user?.user?.credits ?? 0;
   return (
     <div className="p-8">
       <h1 className="text-3xl font-bold mb-2">Billing</h1>

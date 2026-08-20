@@ -1,5 +1,5 @@
 import { Button } from "@/components/ui/button";
-import { ArrowRight, Copy, Send } from "lucide-react";
+import { ArrowRight, Copy } from "lucide-react";
 import moment from "moment/moment";
 import Link from "next/link";
 import React from "react";
@@ -12,12 +12,7 @@ function InterviewCard({ interview, viewDetail = false, index }) {
     navigator.clipboard.writeText(url);
     toast("Copied!!!");
   };
-  const onSend = () => {
-    window.location.href =
-      "mailto:vipin.sao@ssipmt.com?subject=AIrcruiter interview link & body=Interview Link=" +
-      url;
-  };
-  console.log(interview["interview-feedback"]);
+  const candidateCount = interview?.["interview-feedback"]?.length;
   return (
     <div key={index} className="mt-4 p-5 bg-white rounded-lg border shadow-2xl">
       <div className="flex items-center justify-between">
@@ -29,9 +24,9 @@ function InterviewCard({ interview, viewDetail = false, index }) {
       <h2 className="mt-3 font-bold text-lg">{interview?.jobPosition}</h2>
       <h2 className="mt-2 flex justify-between text-gray-500">
         {interview?.duration}
-        <span className="text-green-600">
-          {interview["interview-feedback"]?.length} Candidates
-        </span>
+        {typeof candidateCount === "number" && (
+          <span className="text-green-600">{candidateCount} Candidates</span>
+        )}
       </h2>
       {!viewDetail ? (
         <div className="flex mt-2">

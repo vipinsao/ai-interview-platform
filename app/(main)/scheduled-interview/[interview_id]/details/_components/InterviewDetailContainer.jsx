@@ -2,6 +2,22 @@ import { Calendar, Clock, DockIcon, Type } from "lucide-react";
 import moment from "moment/moment";
 import React from "react";
 
+/**
+ * `type` is stored as a JSON-encoded array of strings. A plain JSON.parse here
+ * threw and blanked the whole page whenever the column held a bare string
+ * instead, so parsing is tolerant of both.
+ */
+function parseInterviewType(type) {
+  if (!type) return null;
+  if (Array.isArray(type)) return type.join(", ");
+  try {
+    const parsed = JSON.parse(type);
+    return Array.isArray(parsed) ? parsed.join(", ") : String(parsed);
+  } catch {
+    return String(type);
+  }
+}
+
 function InterviewDetailContainer({ interviewDetail }) {
   return (
     <div className="p-5 bg-white font-bold rounded-lg mt-5 lg:pr-52">
@@ -26,7 +42,7 @@ function InterviewDetailContainer({ interviewDetail }) {
             <h2 className="text-xs text-gray-500">Type</h2>
             <h2 className="flex text-md gap-2 font-semibold items-center ">
               <DockIcon className="h-4 w-4" />
-              {JSON.parse(interviewDetail?.type)[0]}
+              {parseInterviewType(interviewDetail?.type)}
             </h2>
           </div>
         )}
@@ -40,7 +56,7 @@ function InterviewDetailContainer({ interviewDetail }) {
       <div className="mt-5">
         <h2 className="font-bold">Interview Questions</h2>
         <div className="grid grid-col-2 gap-3 mt-3 text-gray-500">
-          {interviewDetail?.questionList.map((item, ind) => (
+          {(interviewDetail?.questionList ?? []).map((item, ind) => (
             <h2 className="text-xs" key={ind}>
               {ind + 1}.{item?.question}
             </h2>
