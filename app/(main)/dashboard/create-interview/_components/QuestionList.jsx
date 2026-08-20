@@ -1,101 +1,84 @@
 "use client";
 import { Button } from "@/components/ui/button";
-import axios from "axios";
 import { v4 as uuidv4 } from "uuid";
 import { Loader, Loader2Icon } from "lucide-react";
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 import QuestionListContainer from "./QuestionListContainer";
 import { supabase } from "@/services/supabaseClient";
+import { postWithAuth } from "@/services/apiClient";
 import { useUser } from "@/app/provider";
 
 function QuestionList({ formData, onCreateLink }) {
   const { user } = useUser();
   const [loading, setLoading] = useState(false);
   const [saveLoading, setSaveLoading] = useState(false);
-
+  const [error, setError] = useState(null);
   const [questionList, setQuestionList] = useState([]);
 
-  useEffect(() => {
-    if (formData) {
-      GenerateQuestionList();
+  // The endpoint validates the model's reply against a schema and returns
+  // { interviewQuestions }, so there is no fenced-JSON unwrapping to do here.
+  const generateQuestionList = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await postWithAuth("/api/ai-model", formData);
+      setQuestionList(result?.interviewQuestions ?? []);
+    } catch (err) {
+      setError(err.message);
+      toast.error(err.message);
+    } finally {
+      setLoading(false);
     }
   }, [formData]);
-  const GenerateQuestionList = async () => {
-    setLoading(true);
-    try {
-      const result = await axios.post("/api/ai-model", {
-        ...formData,
-      });
 
-      let content = result.data;
+  useEffect(() => {
+    if (formData) generateQuestionList();
+  }, [formData, generateQuestionList]);
 
-      if (!content) {
-        toast.error("No content received from server.");
-        setLoading(false);
-        return;
-      }
-
-      // Ensure content is a string
-      if (typeof content !== "string") {
-        content = JSON.stringify(content);
-      }
-
-      // Try to extract JSON block using regex
-      const match = content.match(/```json\s*([\s\S]*?)```/i);
-      const jsonString = match ? match[1].trim() : content.trim();
-
-      let parsed;
-
-      try {
-        parsed = JSON.parse(jsonString);
-      } catch (jsonError) {
-        console.error("Invalid JSON received from server:", content);
-        toast.error("Invalid JSON format received.");
-        setLoading(false);
-        return;
-      }
-
-      if (!parsed || !parsed.interviewQuestions) {
-        toast.error("No interview questions found in the server response.");
-        setLoading(false);
-        return;
-      }
-      setQuestionList(parsed.interviewQuestions || []);
-      // setQuestionList(data);
-      setLoading(false);
-    } catch (error) {
-      toast.error("Server Error,Try again");
-      setLoading(false);
-    }
-  };
   const onFinish = async () => {
+    if (questionList.length === 0) {
+      toast.error("Generate questions before creating the interview link.");
+      return;
+    }
+
     setSaveLoading(true);
     const interview_id = uuidv4();
-    const { data, error } = await supabase
+
+    const { error: insertError } = await supabase
       .from("Interviews")
       .insert([
         {
           ...formData,
-          questionList: questionList,
+          questionList,
           userEmail: user?.email,
-          interview_id: interview_id,
+          interview_id,
         },
       ])
       .select();
 
-    //Update User Credits
-    const userUpdate = await supabase
+    // Previously the failure was ignored: the user got an interview link for a
+    // row that was never written, and was charged a credit for it.
+    if (insertError) {
+      setSaveLoading(false);
+      toast.error(`Could not save the interview: ${insertError.message}`);
+      return;
+    }
+
+    const { error: creditError } = await supabase
       .from("Users")
       .update({ credits: Number(user?.credits) - 1 })
       .eq("email", user?.email)
       .select();
 
-    console.log(userUpdate);
+    if (creditError) {
+      console.error("Credit update failed:", creditError.message);
+    }
 
     setSaveLoading(false);
     onCreateLink(interview_id);
   };
+
   return (
     <div>
       {loading && (
@@ -104,21 +87,41 @@ function QuestionList({ formData, onCreateLink }) {
           <div>
             <h2 className="font-medium">Generating Interview Questions</h2>
             <p className="text-primary">
-              Our AI is crafting personalized questions bases on your job
-              positions
+              Our AI is crafting personalized questions based on your job
+              position
             </p>
           </div>
         </div>
       )}
-      {!loading && questionList?.length > 0 && (
-        <div>
-          <QuestionListContainer questionList={questionList} />
+
+      {!loading && error && (
+        <div className="p-5 bg-red-50 border border-red-300 rounded-xl">
+          <h2 className="font-medium text-red-800">
+            Could not generate questions
+          </h2>
+          <p className="text-sm text-red-700 mt-1">{error}</p>
+          <Button
+            variant="outline"
+            className="mt-3 cursor-pointer"
+            onClick={generateQuestionList}
+          >
+            Try again
+          </Button>
         </div>
       )}
+
+      {!loading && questionList.length > 0 && (
+        <QuestionListContainer questionList={questionList} />
+      )}
+
       <div className="flex justify-end mt-10">
-        <Button onClick={() => onFinish()} disabled={saveLoading}>
-          {saveLoading && <Loader className="animate-spin" />}Created Interview
-          Link & Finish
+        <Button
+          onClick={onFinish}
+          disabled={saveLoading || loading || questionList.length === 0}
+          className="cursor-pointer"
+        >
+          {saveLoading && <Loader className="animate-spin" />}
+          Create Interview Link &amp; Finish
         </Button>
       </div>
     </div>
