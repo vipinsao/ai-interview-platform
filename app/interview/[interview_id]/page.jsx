@@ -1,58 +1,67 @@
 "use client";
-import React, { useContext, useEffect, useState } from "react";
+import React, { useCallback, useContext, useEffect, useState } from "react";
 import Image from "next/image";
 import { Clock, Info, Loader2Icon, Video } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { useParams, useRouter } from "next/navigation";
-import { supabase } from "@/services/supabaseClient";
 import { toast } from "sonner";
 import { InterviewDataContext } from "@/context/InterviewDataContext";
 
 function Interview() {
   const { interview_id } = useParams();
-  const [interviewData, setInterviewData] = useState();
-  const [userName, setUserName] = useState();
-  const [loading, setLoading] = useState(false);
-  const [userEmail, setUserEmail] = useState();
+  const [interviewData, setInterviewData] = useState(null);
+  const [userName, setUserName] = useState("");
+  const [userEmail, setUserEmail] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [joining, setJoining] = useState(false);
+  const [linkError, setLinkError] = useState(null);
 
-  const { interviewInfo, setInterviewInfo } = useContext(InterviewDataContext);
+  const { setInterviewInfo } = useContext(InterviewDataContext);
   const router = useRouter();
-  useEffect(() => {
-    interview_id && GetInterviewDetail();
+
+  // Read through the API rather than straight from Supabase: the candidate is
+  // not signed in, and row level security denies anonymous reads of the
+  // Interviews table so the anon key cannot be used to list other people's
+  // interviews. The route returns exactly the row this link names.
+  //
+  // Every exit path here has to clear `loading`. It previously returned early
+  // on an unknown link and on a query error, leaving the page spinning with
+  // the Join button disabled forever.
+  const getInterviewDetail = useCallback(async () => {
+    setLoading(true);
+    setLinkError(null);
+    try {
+      const response = await fetch(`/api/interview/${interview_id}`);
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        setLinkError(payload?.error ?? "We could not load this interview.");
+      } else {
+        setInterviewData(payload);
+      }
+    } catch {
+      setLinkError("We could not load this interview. Please try again.");
+    } finally {
+      setLoading(false);
+    }
   }, [interview_id]);
 
-  const GetInterviewDetail = async () => {
-    setLoading(true);
-    try {
-      let { data: Interviews, error } = await supabase
-        .from("Interviews")
-        .select("jobPosition,jobDescription,duration,type")
-        .eq("interview_id", interview_id);
-      setInterviewData(Interviews[0]);
-      if (Interviews?.length === 0) {
-        toast("Incorrect Interview Link");
-        return;
-      }
-      setLoading(false);
-    } catch (error) {
-      toast("Incorrect Interview Link", error);
-    }
-  };
+  useEffect(() => {
+    if (interview_id) getInterviewDetail();
+  }, [interview_id, getInterviewDetail]);
 
-  const onJoinInterview = async () => {
-    setLoading(true);
-    let { data: Interviews, error } = await supabase
-      .from("Interviews")
-      .select("*")
-      .eq("interview_id", interview_id);
+  const onJoinInterview = () => {
+    if (!interviewData) {
+      toast.error("This interview link is no longer valid.");
+      return;
+    }
+    setJoining(true);
     setInterviewInfo({
-      userName: userName,
-      userEmail: userEmail,
-      interviewData: Interviews[0],
+      userName: userName.trim(),
+      userEmail: userEmail.trim(),
+      interviewData,
     });
     router.push("/interview/" + interview_id + "/start");
-    setLoading(false);
   };
 
   return (
@@ -135,12 +144,22 @@ function Interview() {
             </li>
           </ul>
         </div>
+        {linkError && (
+          <p className="mt-4 w-full text-sm text-red-700 bg-red-50 border border-red-200 rounded-md p-3">
+            {linkError}
+          </p>
+        )}
         <Button
           className={"mt-5 w-full font-bold flex items-center"}
-          disabled={loading || !userName}
+          disabled={loading || joining || Boolean(linkError) || !userName.trim()}
           onClick={() => onJoinInterview()}
         >
-          <Video /> {loading && <Loader2Icon />} Join Interview
+          {joining ? (
+            <Loader2Icon className="animate-spin" />
+          ) : (
+            <Video />
+          )}{" "}
+          {loading ? "Loading interview…" : "Join Interview"}
         </Button>
       </div>
     </div>
