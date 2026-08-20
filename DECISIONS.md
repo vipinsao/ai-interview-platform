@@ -212,6 +212,82 @@ symmetrical. Accidentally running sandbox in production means real orders cannot
 be captured and nobody gets credits — visible immediately. Accidentally running
 live means taking real money. Only the first is reachable by a typo.
 
+## The report is built from what the server recorded, not what the client sent
+
+This is the one that matters most, because it defeated the product's whole
+function rather than any single feature.
+
+`/api/ai-feedback` accepted the answers in its request body — questions,
+transcripts and scores — and did arithmetic over them. The interview flow is
+deliberately anonymous, so there was nothing to authenticate. Anybody holding an
+invite link could send:
+
+```
+POST /api/ai-feedback
+{"interview_id":"<uuid from my invite link>","userName":"Alex",
+ "answers":[{"question":"...","transcript":"...","score":10,"strengths":["exceptional"]}]}
+```
+
+and land a 10/10 report card, with text they wrote, on the recruiter's
+dashboard. `/api/score-answer` never had to be called at all.
+
+### Why the existing defence missed it
+
+`lib/score.js` is documented as "deliberately arithmetic rather than a second
+model call: the same set of answers must always produce the same overall
+rating". That is true, and it was the wrong property to be proud of.
+**Determinism was never the threat; provenance was.** Arithmetic over numbers
+the candidate chose is deterministic and reliably wrong. Schema validation had
+the same blind spot one level down: `answerScoreSchema` proves a score is a
+number between 0 and 10, and an injected `10` satisfies it perfectly. A schema
+constrains shape. It cannot constrain truthfulness.
+
+### What replaces it
+
+Scores are written to `answer_scores` by `/api/score-answer` at the moment it
+issues them, keyed on the candidate's session. `/api/ai-feedback` is sent a
+session token and nothing else; it reads the questions from the interview and
+the scores from those rows. There is no field in the final request that can
+change a number, because there is no field in the final request.
+
+Write-once, with one exception: a question that already carries a real score
+keeps it. Without that, an answer could be resubmitted until the model happened
+to return a ten, and re-rolling would be indistinguishable from answering. The
+exception is a score left null because the model failed, which may be
+overwritten so a retry after an outage still works. That rule lives in
+`record_answer_score()` rather than in JavaScript, because two concurrent
+submissions of the same answer would straddle an application-level check —
+twelve simultaneous submissions are tested, and exactly one is recorded.
+
+### The same fix closed two more things
+
+**The scoring endpoint was an open proxy to the language model.** It took the
+question as free text and never checked it against the interview's own list, so
+anyone with a link had roughly 120 completions an hour on the project's Groq key
+with a prompt they controlled — and `fillTemplate` is plain string substitution
+with no escaping that interpolates the question *above* the scoring criteria, so
+injected text reads as instructions rather than as data. The request now carries
+an integer index and the server reads the question out of the stored
+`questionList`. There is no way to put words into the prompt. The same text also
+used to reach the summary prompt at the end of the interview, by the same route.
+
+**One candidate could destroy another's interview.** The rate limit was keyed on
+the interview id, which every candidate holding the same invite link has, so
+twenty requests from anybody 429'd the next genuine candidate to finish — and
+their answers existed only in React state, so the interview they had just sat
+was gone. Limits are now keyed on the session token. Starting a session is still
+keyed on the interview id, which is safe because it is one cheap insert with no
+model call: exhausting it delays new joins without touching an interview already
+in progress, whose answers are on disk either way.
+
+### A related leak, fixed while here
+
+`GET /api/interview/[id]` returned the full `questionList` and `jobDescription`.
+The join screen never displayed either, so this was invisible in the browser and
+one curl away — anybody with a link could read the questions and prepare against
+them. The questions are now released by the session route, when a candidate
+actually starts.
+
 ## Shareable reports: a link is a credential, so it is a narrow one
 
 A recruiter usually needs to show a report to a colleague who has no account.
@@ -288,6 +364,19 @@ intended pattern — RLS scopes them to `userEmail = auth.jwt() ->> 'email'`.
 `lib/ownership.js` re-checks the owner on the returned row as defence in depth
 and turns a denial into an explicit "not available" state, because the previous
 behaviour was a page that loaded forever.
+
+That re-check used to fail open. It was guarded on
+`typeof owner === "string" && owner !== userEmail`, so a row with no `userEmail`
+column — precisely what a query that forgot its filter returns — was not a
+string, therefore not a mismatch, therefore allowed. The helper exists to catch
+that one case and did not. The guard is gone and both cases are tested.
+
+Because these reads happen in the browser, RLS is not defence in depth for them;
+it is the defence. `npm run verify:db` exists to answer the only question the
+test suite cannot — whether the schema was ever applied to the database actually
+serving the app. It is read-only, and it is deliberately not a CI job: CI has no
+route to production, and giving it one would mean storing a superuser credential
+in a repository secret in order to check that credentials are well guarded.
 
 ## Groq as the language model provider
 
