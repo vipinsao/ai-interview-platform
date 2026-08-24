@@ -10,30 +10,62 @@ function Login() {
 
   // Sign in with Google.
   //
-  // This used to console.log the error and return. Nothing on the page changed,
-  // so a failure and a slow redirect looked identical: the button appeared to
-  // do nothing at all. That is also exactly how an unreachable Supabase project
-  // presents, which is the one failure a visitor is most likely to meet.
+  // supabase-js does NOT make a network request here. In a browser
+  // signInWithOAuth builds the authorize URL and hands it straight to
+  // window.location.assign, then returns { error: null }. So when the project
+  // is unreachable it does not fail - it navigates the visitor away and the
+  // browser renders its own DNS error page showing the raw project hostname.
+  // An earlier attempt to surface the failure by reporting `error` and
+  // catching a throw could never run: neither happens, and the page is gone
+  // before either could paint.
+  //
+  // skipBrowserRedirect keeps us on the page so the redirect is ours to make,
+  // and a reachability probe decides whether making it is worth doing.
   const signInWithGoogle = async () => {
     if (pending) return;
     setPending(true);
     setError("");
 
     try {
-      const { error } = await supabase.auth.signInWithOAuth({
+      const { data, error } = await supabase.auth.signInWithOAuth({
         provider: "google",
+        options: { skipBrowserRedirect: true },
       });
+
       if (error) {
         setError(error.message);
         setPending(false);
+        return;
       }
-      // On success the browser is redirected to Google, so nothing below runs
-      // and `pending` deliberately stays set.
+      if (!data?.url) {
+        setError("Could not build a sign-in URL for Google.");
+        setPending(false);
+        return;
+      }
+
+      // no-cors gives an opaque response we cannot read, which is fine: we only
+      // need to know whether the host answers at all. DNS failure, a paused
+      // project or no network all reject here instead of stranding the visitor
+      // on a browser error page.
+      const base = process.env.NEXT_PUBLIC_SUPABASE_URL;
+      try {
+        await fetch(`${base}/auth/v1/health`, {
+          mode: "no-cors",
+          cache: "no-store",
+          signal: AbortSignal.timeout(8000),
+        });
+      } catch {
+        setError(
+          "The authentication service is not reachable, so sign-in cannot start. This deployment's Supabase project is unavailable."
+        );
+        setPending(false);
+        return;
+      }
+
+      window.location.assign(data.url);
     } catch (e) {
-      // Thrown rather than returned when the project cannot be reached at all
-      // — DNS failure, paused project, no network.
       setError(
-        `Could not reach the authentication service. ${e?.message || ""}`.trim()
+        `Could not start sign-in. ${e?.message || ""}`.trim()
       );
       setPending(false);
     }
@@ -73,6 +105,7 @@ function Login() {
             {error && (
               <p
                 role="alert"
+                data-testid="auth-error"
                 className="mt-3 w-full rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800"
               >
                 {error}

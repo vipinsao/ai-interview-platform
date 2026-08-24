@@ -13,11 +13,29 @@ import React, { useCallback, useContext, useEffect, useState } from "react";
 function Provider({ children }) {
   const [user, setUser] = useState(null);
 
+  // "loading" until the session lookup answers, then "signed-in" or
+  // "signed-out". Without this, a signed-out visitor is indistinguishable from
+  // one whose profile has not arrived yet: `user` is null in both cases. Every
+  // consumer guarded on `user &&`, so nothing ever ran and nothing ever
+  // reported why - pages sat on their loading state for ever.
+  const [authStatus, setAuthStatus] = useState("loading");
+
   const loadOrCreateUser = useCallback(async () => {
-    const {
-      data: { user: account },
-    } = await supabase.auth.getUser();
-    if (!account?.email) return;
+    let account;
+    try {
+      ({
+        data: { user: account },
+      } = await supabase.auth.getUser());
+    } catch (e) {
+      // An unreachable project throws here rather than returning an error.
+      console.error("[provider] could not reach auth:", e?.message);
+      setAuthStatus("signed-out");
+      return;
+    }
+    if (!account?.email) {
+      setAuthStatus("signed-out");
+      return;
+    }
 
     const { data: existing, error } = await supabase
       .from("Users")
@@ -27,10 +45,12 @@ function Provider({ children }) {
 
     if (error) {
       console.error("[provider] could not read the profile:", error.message);
+      setAuthStatus("signed-out");
       return;
     }
     if (existing) {
       setUser(existing);
+      setAuthStatus("signed-in");
       return;
     }
 
@@ -53,9 +73,11 @@ function Provider({ children }) {
 
     if (insertError) {
       console.error("[provider] could not create the profile:", insertError.message);
+      setAuthStatus("signed-out");
       return;
     }
     setUser(created);
+    setAuthStatus("signed-in");
   }, []);
 
   useEffect(() => {
@@ -63,7 +85,7 @@ function Provider({ children }) {
   }, [loadOrCreateUser]);
 
   return (
-    <UserDetailContext.Provider value={{ user, setUser }}>
+    <UserDetailContext.Provider value={{ user, setUser, authStatus }}>
       <div>{children}</div>
     </UserDetailContext.Provider>
   );
