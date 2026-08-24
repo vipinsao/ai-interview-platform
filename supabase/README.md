@@ -134,3 +134,24 @@ them would prove nothing. It earned its keep immediately, by catching that
 `revoke ... from public` does **not** remove Supabase's explicit grant of
 EXECUTE to `authenticated` — which had left the function that adds credits
 callable straight from the browser.
+
+## Restoring the backend from nothing
+
+The hosted project this app pointed at no longer resolves, so the deployed demo
+had a working front end and no database behind it. Rebuilding one is short,
+because the schema is in this repository rather than only in a dashboard.
+
+1. Create a project at [supabase.com](https://supabase.com) — free tier, no card.
+2. SQL Editor → paste `supabase/schema.sql` → Run. It is idempotent
+   (`create table if not exists`), so a re-run is safe.
+3. Authentication → Providers → enable **Google**, and add the deployed origin
+   plus `http://localhost:3000` to the redirect allow-list.
+4. Project Settings → API. Copy the Project URL, the `anon` key and the
+   `service_role` key into the environment — locally in `.env.local`, and in the
+   hosting provider for the deployed site. `.env.example` documents every one.
+5. `node scripts/verify-live-schema.mjs` checks the live project against what
+   the application actually queries.
+
+Then set the `SUPABASE_URL` variable and `SUPABASE_ANON_KEY` secret described in
+`.github/workflows/keep-supabase-awake.yml`, or the new project will pause after
+seven idle days exactly as the last one did.

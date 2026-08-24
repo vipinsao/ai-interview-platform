@@ -2,18 +2,43 @@
 import { Button } from "@/components/ui/button";
 import { supabase } from "@/services/supabaseClient";
 import Image from "next/image";
-import React from "react";
+import React, { useState } from "react";
 
 function Login() {
-  //use to sign with google
+  const [error, setError] = useState("");
+  const [pending, setPending] = useState(false);
+
+  // Sign in with Google.
+  //
+  // This used to console.log the error and return. Nothing on the page changed,
+  // so a failure and a slow redirect looked identical: the button appeared to
+  // do nothing at all. That is also exactly how an unreachable Supabase project
+  // presents, which is the one failure a visitor is most likely to meet.
   const signInWithGoogle = async () => {
-    const { error } = await supabase.auth.signInWithOAuth({
-      provider: "google",
-    });
-    if (error) {
-      console.log("Error signing in with Google:", error.message);
+    if (pending) return;
+    setPending(true);
+    setError("");
+
+    try {
+      const { error } = await supabase.auth.signInWithOAuth({
+        provider: "google",
+      });
+      if (error) {
+        setError(error.message);
+        setPending(false);
+      }
+      // On success the browser is redirected to Google, so nothing below runs
+      // and `pending` deliberately stays set.
+    } catch (e) {
+      // Thrown rather than returned when the project cannot be reached at all
+      // — DNS failure, paused project, no network.
+      setError(
+        `Could not reach the authentication service. ${e?.message || ""}`.trim()
+      );
+      setPending(false);
     }
   };
+
   return (
     <div className="flex flex-col items-center justify-center h-screen bg-gradient-to-r from-[#dc7fbf] to-[#2a4675] px-4">
       <div className="flex flex-col items-center border p-6 sm:p-12 border-blue-300 rounded-2xl w-full max-w-[400px]">
@@ -40,10 +65,19 @@ function Login() {
             </p>
             <Button
               onClick={signInWithGoogle}
+              disabled={pending}
               className="mt-2 cursor-pointer rounded-2xl w-full hover:bg-gray-700 hover:border-blue-200"
             >
-              Sign in With Google
+              {pending ? "Signing in…" : "Sign in With Google"}
             </Button>
+            {error && (
+              <p
+                role="alert"
+                className="mt-3 w-full rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800"
+              >
+                {error}
+              </p>
+            )}
           </div>
         </div>
       </div>

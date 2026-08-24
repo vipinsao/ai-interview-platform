@@ -1,0 +1,62 @@
+# Supabase pauses a free project after 7 days with no database activity, and a
+# paused project stops answering: the deployed site still renders, every call
+# behind it fails, and the sign-in button does nothing. That is how the previous
+# project ended up gone, taking the live demo with it.
+#
+# This does one cheap authenticated read on a schedule so the project never
+# reaches 7 idle days, and fails loudly when it cannot — so the demo being down
+# arrives as a red run here rather than as silence in front of whoever is
+# reading this repository.
+#
+# Setup (once):
+#   Settings -> Secrets and variables -> Actions
+#     variable SUPABASE_URL        = https://<project-ref>.supabase.co
+#     secret   SUPABASE_ANON_KEY   = the public anon key
+#
+# Note: GitHub disables scheduled workflows in a repository with no activity for
+# 60 days. Re-enable it from the Actions tab if that happens.
+
+name: Keep Supabase awake
+
+on:
+  schedule:
+    - cron: "17 6 */3 * *" # every third day, 06:17 UTC
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Read one row through PostgREST
+        env:
+          URL: ${{ vars.SUPABASE_URL }}
+          KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${URL:-}" ] || [ -z "${KEY:-}" ]; then
+            echo "SUPABASE_URL variable or SUPABASE_ANON_KEY secret is not set."
+            echo "See the header of this workflow file."
+            exit 1
+          fi
+
+          # A HEAD against a table the anon role is allowed to reach. The row
+          # level security policies mean this returns no rows; the point is that
+          # the query planner ran, which is what counts as activity.
+          code=$(curl -sS -o /tmp/body -w '%{http_code}' --max-time 30 \
+            -H "apikey: $KEY" \
+            -H "Authorization: Bearer $KEY" \
+            -H "Range: 0-0" \
+            "$URL/rest/v1/Users?select=id" || echo 000)
+
+          echo "HTTP $code"
+          head -c 400 /tmp/body || true
+          echo
+
+          # 200 and 206 are reads. 401 and 403 mean row level security refused
+          # us, which still required a live database and is a pass here.
+          case "$code" in
+            200|206|401|403) echo "Project is awake."; exit 0 ;;
+            000) echo "Could not reach $URL at all - DNS or network. The project may be deleted."; exit 1 ;;
+            *)   echo "Unexpected status $code."; exit 1 ;;
+          esac
