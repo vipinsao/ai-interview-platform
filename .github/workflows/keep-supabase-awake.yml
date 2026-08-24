@@ -34,10 +34,14 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Not yet configured is not a failure. This workflow lands before the
+          # replacement project exists, and a red cross on a public repository
+          # for "you have not finished setting this up" is worse than useless -
+          # it trains you to ignore the one signal this job exists to give.
           if [ -z "${URL:-}" ] || [ -z "${KEY:-}" ]; then
-            echo "SUPABASE_URL variable or SUPABASE_ANON_KEY secret is not set."
-            echo "See the header of this workflow file."
-            exit 1
+            echo "::notice::SUPABASE_URL variable / SUPABASE_ANON_KEY secret not set - skipping."
+            echo "See the header of this workflow file for the two values to add."
+            exit 0
           fi
 
           # A HEAD against a table the anon role is allowed to reach. The row
