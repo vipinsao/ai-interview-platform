@@ -47,11 +47,16 @@ jobs:
           # A HEAD against a table the anon role is allowed to reach. The row
           # level security policies mean this returns no rows; the point is that
           # the query planner ran, which is what counts as activity.
+          # curl already prints 000 on a connection failure, so a `|| echo 000`
+          # here concatenated a second one and produced "000000", which fell
+          # through to the generic branch and lost the message that matters.
+          : > /tmp/body
           code=$(curl -sS -o /tmp/body -w '%{http_code}' --max-time 30 \
             -H "apikey: $KEY" \
             -H "Authorization: Bearer $KEY" \
             -H "Range: 0-0" \
-            "$URL/rest/v1/Users?select=id" || echo 000)
+            "$URL/rest/v1/Users?select=id") || true
+          code=${code:-000}
 
           echo "HTTP $code"
           head -c 400 /tmp/body || true
