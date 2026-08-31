@@ -2,7 +2,7 @@
 
 A web app where a recruiter generates a role-specific interview with a language model, shares a link, and the candidate answers out loud in the browser — each answer scored individually and collected into a report.
 
-**You can check it without an account.** `npm install && npm test` runs 85 tests
+**You can check it without an account.** `npm install && npm test` runs 99 tests
 in under a second with no keys, no card and no network — [what they cover](#try-it-without-an-account).
 
 ## Screenshots
@@ -18,7 +18,7 @@ in under a second with no keys, no card and no network — [what they cover](#tr
 
 Two paths need no credentials, no card and no network.
 
-**Run the tests.** 85 of them, in under a second, with no keys:
+**Run the tests.** 99 of them, in under a second, with no keys:
 
 ```bash
 git clone https://github.com/vipinsao/ai-interview-platform.git
@@ -214,7 +214,7 @@ npm run build
 To run the database tests too:
 
 ```bash
-TEST_DATABASE_URL="postgres://…" npm test    # adds 24 tests against real Postgres, 109 in all
+TEST_DATABASE_URL="postgres://…" npm test    # adds 29 tests against real Postgres, 128 in all
 ```
 
 [supabase/README.md](./supabase/README.md) has a copy-paste way to get a throwaway PostgreSQL for free, without Docker and without root.
@@ -262,7 +262,7 @@ Only what is actually in `package.json`:
 
 **There is no deployed instance linked here.** An earlier build was deployed to Vercel, but it runs the pre-rewrite code and its question generation is broken — the free OpenRouter model it called (`microsoft/mai-ds-r1:free`) has been retired and the endpoint now returns a 404 from upstream. Redeploy from this branch before linking a demo.
 
-**The default model changed.** Groq retired `llama-3.3-70b-versatile` on 2026-08-16, so the previous default 404'd on a fresh clone. The default is now `openai/gpt-oss-120b`, which is on Groq's current production list and supports the JSON mode this code needs. That was checked against Groq's published model list, not by calling the API — set `LLM_MODEL` if Groq's list has moved on again.
+**The default model changed.** Groq retired `llama-3.3-70b-versatile` on 2026-08-16, so the previous default 404'd on a fresh clone. The default is now `openai/gpt-oss-120b`, which is on Groq's current production list and supports the JSON mode this code needs. That was checked against Groq's published model list, not by calling the API; re-checked against that list on 2026-08-31 and still current — set `LLM_MODEL` if Groq's list has moved on again.
 
 **Two toast libraries are in use** (`sonner` and `react-hot-toast`) for historical reasons. One should go.
 
